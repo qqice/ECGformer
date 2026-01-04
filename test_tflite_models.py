@@ -338,29 +338,31 @@ def plot_comparison_charts(all_results, y_test, output_dir):
     print(f"✓ 保存雷达图: {radar_path}")
     plt.close()
 
-    # 3. 混淆矩阵对比（选择Keras和最佳量化模型）
-    if len(all_results) >= 2:
-        fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+    # 3. 混淆矩阵对比（展示所有模型）
+    if len(all_results) > 0:
+        num_models = len(all_results)
+        cols = 2
+        rows = (num_models + 1) // 2
+        
+        fig, axes = plt.subplots(rows, cols, figsize=(16, 7 * rows))
+        axes = axes.flatten()
 
-        # Keras模型混淆矩阵
-        cm_keras = confusion_matrix(y_test, all_results[0]['predictions'])
-        sns.heatmap(cm_keras, annot=True, fmt='d', cmap='Blues', ax=axes[0], cbar_kws={'label': 'Count'})
-        axes[0].set_title(f'Confusion Matrix - {all_results[0]["model_name"]}', fontsize=12, fontweight='bold')
-        axes[0].set_xlabel('Predicted Label', fontsize=11)
-        axes[0].set_ylabel('True Label', fontsize=11)
+        # 定义不同模型使用的颜色映射
+        colormaps = ['Blues', 'Greens', 'Oranges', 'Purples', 'Reds']
 
-        # 最佳量化模型混淆矩阵（准确率最高的量化模型）
-        best_quantized_idx = 1
-        for i in range(1, len(all_results)):
-            if all_results[i]['accuracy'] > all_results[best_quantized_idx]['accuracy']:
-                best_quantized_idx = i
+        for i, result in enumerate(all_results):
+            cm = confusion_matrix(y_test, result['predictions'])
+            # 选择颜色映射
+            cmap = colormaps[i % len(colormaps)]
+            
+            sns.heatmap(cm, annot=True, fmt='d', cmap=cmap, ax=axes[i], cbar_kws={'label': 'Count'})
+            axes[i].set_title(f'Confusion Matrix - {result["model_name"]}', fontsize=12, fontweight='bold')
+            axes[i].set_xlabel('Predicted Label', fontsize=11)
+            axes[i].set_ylabel('True Label', fontsize=11)
 
-        cm_quant = confusion_matrix(y_test, all_results[best_quantized_idx]['predictions'])
-        sns.heatmap(cm_quant, annot=True, fmt='d', cmap='Oranges', ax=axes[1], cbar_kws={'label': 'Count'})
-        axes[1].set_title(f'Confusion Matrix - {all_results[best_quantized_idx]["model_name"]}',
-                         fontsize=12, fontweight='bold')
-        axes[1].set_xlabel('Predicted Label', fontsize=11)
-        axes[1].set_ylabel('True Label', fontsize=11)
+        # 隐藏多余的子图
+        for i in range(num_models, len(axes)):
+            axes[i].axis('off')
 
         plt.tight_layout()
         cm_path = os.path.join(output_dir, 'confusion_matrices.png')
@@ -450,6 +452,7 @@ def main():
 
     # 测试所有TFLite模型
     tflite_models = [
+        'ecgformer_custom_ln_int8.tflite',
         'ecgformer_ptq_dynamic.tflite',
         'ecgformer_ptq_float16.tflite',
         #'ecgformer_ptq_int8.tflite',
