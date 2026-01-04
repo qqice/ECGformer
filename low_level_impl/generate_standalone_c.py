@@ -1,8 +1,10 @@
+# -*- coding: utf-8 -*-
 """
-生成完整独立的ECGformer C实现代码
+生成完整独立的ECGformer C实现代码 - Bare-metal Hardware Verification Style
 
 这个脚本生成一个完整独立的C文件，包含所有权重数据和推理代码。
 可以直接编译运行，无需其他头文件。
+针对RISC-V AI加速器硬件验证优化。
 """
 
 import numpy as np
@@ -353,10 +355,12 @@ static const char* CLASS_NAMES[5] = {{"N (正常)", "S (室上性)", "V (室性)
         print(f"  生成: ecgformer_biases.h")
     
     def _generate_quant_header(self, output_dir: str):
-        """生成量化参数头文件"""
+        """生成量化参数头文件 - Bare-metal Style (无结构体)"""
         code = '''/**
- * ECGformer 量化参数
+ * ECGformer 量化参数 - Bare-metal Style
  * 自动生成 - 请勿手动修改
+ * 
+ * 注意: 不使用结构体, 使用扁平数组以便直接硬件访问
  */
 
 #ifndef ECGFORMER_QUANT_H
@@ -374,7 +378,7 @@ static const char* CLASS_NAMES[5] = {{"N (正常)", "S (室上性)", "V (室性)
             
             if len(scales) > 1:
                 code += f'// 张量 {tid} 的per-channel scales ({len(scales)} channels)\n'
-                code += f'static const float scales_t{tid}[{len(scales)}] = {{\n    '
+                code += f'static const float pscales_t{tid}[{len(scales)}] = {{\n    '
                 for i, s in enumerate(scales):
                     code += f'{s:.10e}f'
                     if i < len(scales) - 1:
@@ -384,23 +388,36 @@ static const char* CLASS_NAMES[5] = {{"N (正常)", "S (室上性)", "V (室性)
                 code += '\n};\n\n'
         
         code += '''
-// ============== 张量量化信息结构 ==============
-
-typedef struct {
-    float scale;
-    int32_t zero_point;
-} QuantInfo;
+// ============== 扁平量化参数数组 (无结构体) ==============
+// 使用两个独立数组: pscales_tensor[] 和 pzeropoints_tensor[]
+// 索引对应张量ID
 
 '''
         
-        # 生成所有张量的量化信息
-        code += f'static const QuantInfo tensor_quant[{len(self.tensors_info)}] = {{\n'
+        # 生成所有张量的scale数组
+        code += f'// 所有张量的scale (索引=张量ID)\n'
+        code += f'static const float pscales_tensor[{len(self.tensors_info)}] = {{\n'
         for tid in range(len(self.tensors_info)):
-            scale, zp = self._get_scale_zp(tid)
-            code += f'    [{tid}] = {{ {scale:.10e}f, {zp} }},\n'
+            scale, _ = self._get_scale_zp(tid)
+            code += f'    /* T{tid} */ {scale:.10e}f,\n'
         code += '};\n\n'
         
-        code += '#endif // ECGFORMER_QUANT_H\n'
+        # 生成所有张量的zero_point数组
+        code += f'// 所有张量的zero_point (索引=张量ID)\n'
+        code += f'static const int32_t pzeropoints_tensor[{len(self.tensors_info)}] = {{\n'
+        for tid in range(len(self.tensors_info)):
+            _, zp = self._get_scale_zp(tid)
+            code += f'    /* T{tid} */ {zp},\n'
+        code += '};\n\n'
+        
+        # 添加内联访问宏
+        code += '''// ============== 访问宏 (替代结构体访问) ==============
+// 使用指针算术访问: *(pscales_tensor + tid), *(pzeropoints_tensor + tid)
+#define GET_SCALE(tid)      (*(pscales_tensor + (tid)))
+#define GET_ZEROPOINT(tid)  (*(pzeropoints_tensor + (tid)))
+
+#endif // ECGFORMER_QUANT_H
+'''
         
         path = os.path.join(output_dir, 'ecgformer_quant.h')
         with open(path, 'w') as f:
@@ -408,10 +425,16 @@ typedef struct {
         print(f"  生成: ecgformer_quant.h")
     
     def _generate_ops_header(self, output_dir: str):
-        """生成操作函数头文件"""
+        """生成操作函数头文件 - Bare-metal Hardware Verification Style"""
         code = '''/**
- * ECGformer 操作函数
+ * ECGformer 操作函数 - Bare-metal Hardware Verification Style
  * 自动生成 - 请勿手动修改
+ * 
+ * 命名约定:
+ *   - 指针: p前缀 (pinput, poutput, pfilter)
+ *   - 维度: side (inside, oside, fside)
+ *   - 通道: chn_in, chn_out
+ *   - 临时变量: t0, t1, t2... (模拟寄存器)
  */
 
 #ifndef ECGFORMER_OPS_H
@@ -422,133 +445,218 @@ typedef struct {
 #include <math.h>
 #include <stdlib.h>
 
+// ============== 硬件验证宏 ==============
+
+// 位移替代除法 (仅用于2的幂次)
+#define DIV2(x)   ((x) >> 1)
+#define DIV4(x)   ((x) >> 2)
+#define DIV8(x)   ((x) >> 3)
+#define DIV16(x)  ((x) >> 4)
+#define DIV32(x)  ((x) >> 5)
+#define DIV64(x)  ((x) >> 6)
+#define DIV128(x) ((x) >> 7)
+#define DIV256(x) ((x) >> 8)
+
+// 位移替代乘法 (仅用于2的幂次)
+#define MUL2(x)   ((x) << 1)
+#define MUL4(x)   ((x) << 2)
+#define MUL8(x)   ((x) << 3)
+#define MUL16(x)  ((x) << 4)
+#define MUL32(x)  ((x) << 5)
+#define MUL64(x)  ((x) << 6)
+#define MUL128(x) ((x) << 7)
+#define MUL256(x) ((x) << 8)
+
+// 自定义指令占位宏 (RISC-V)
+#define HW_BARRIER()  asm volatile("" ::: "memory")
+#define HW_NOP()      asm volatile("nop")
+
+// 自定义加速器指令模板 (.insn format)
+// 用法: HW_CUSTOM_OP(rd, rs1, rs2) 执行自定义操作
+// .insn r opcode, funct3, funct7, rd, rs1, rs2
+#define HW_MAC_INIT(acc)      asm volatile(".insn r 0x0b, 0x0, 0x00, %0, x0, x0" : "=r"(acc))
+#define HW_MAC_ACC(acc, a, b) asm volatile(".insn r 0x0b, 0x1, 0x00, %0, %1, %2" : "+r"(acc) : "r"(a), "r"(b))
+#define HW_QUANT(out, in, s)  asm volatile(".insn r 0x0b, 0x2, 0x00, %0, %1, %2" : "=r"(out) : "r"(in), "r"(s))
+
 // ============== 辅助函数 ==============
 
-static inline int8_t saturate_int8(int32_t value) {
-    if (value > 127) return 127;
-    if (value < -128) return -128;
-    return (int8_t)value;
+static inline int8_t saturate_int8(int32_t t0) {
+    if (t0 > 127) return 127;
+    if (t0 < -128) return -128;
+    return (int8_t)t0;
 }
 
-static inline int8_t quantize_float(float value, float scale, int32_t zp) {
-    return saturate_int8((int32_t)roundf(value / scale) + zp);
+static inline int8_t quantize_float(float t0, float scale, int32_t zp) {
+    return saturate_int8((int32_t)roundf(t0 / scale) + zp);
 }
 
-static inline float dequantize_int8(int8_t value, float scale, int32_t zp) {
-    return ((float)value - (float)zp) * scale;
+static inline float dequantize_int8(int8_t t0, float scale, int32_t zp) {
+    return ((float)t0 - (float)zp) * scale;
 }
 
 // ============== 元素级操作 ==============
 
-// 元素级加法
-static void op_add(const int8_t* in1, const int8_t* in2, int8_t* out, int size,
+// 元素级加法: pout[i] = pin1[i] + pin2[i] (量化)
+static void op_add(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
                    float s1, int z1, float s2, int z2, float so, int zo) {
-    float r1 = s1 / so, r2 = s2 / so;
-    for (int i = 0; i < size; i++) {
-        float v = ((float)in1[i] - z1) * r1 + ((float)in2[i] - z2) * r2;
-        out[i] = saturate_int8((int32_t)roundf(v) + zo);
+    float t0 = s1 / so;
+    float t1 = s2 / so;
+    for (volatile int i = 0; i < len; i++) {
+        float t2 = ((float)pin1[i] - z1) * t0 + ((float)pin2[i] - z2) * t1;
+        pout[i] = saturate_int8((int32_t)roundf(t2) + zo);
     }
 }
 
-// 元素级减法
-static void op_sub(const int8_t* in1, const int8_t* in2, int8_t* out, int size,
+// 元素级减法: pout[i] = pin1[i] - pin2[i] (量化)
+static void op_sub(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
                    float s1, int z1, float s2, int z2, float so, int zo) {
-    float r1 = s1 / so, r2 = s2 / so;
-    for (int i = 0; i < size; i++) {
-        float v = ((float)in1[i] - z1) * r1 - ((float)in2[i] - z2) * r2;
-        out[i] = saturate_int8((int32_t)roundf(v) + zo);
+    float t0 = s1 / so;
+    float t1 = s2 / so;
+    for (volatile int i = 0; i < len; i++) {
+        float t2 = ((float)pin1[i] - z1) * t0 - ((float)pin2[i] - z2) * t1;
+        pout[i] = saturate_int8((int32_t)roundf(t2) + zo);
     }
 }
 
-// 元素级乘法
-static void op_mul(const int8_t* in1, const int8_t* in2, int8_t* out, int size,
+// 元素级乘法: pout[i] = pin1[i] * pin2[i] (量化)
+static void op_mul(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
                    float s1, int z1, float s2, int z2, float so, int zo) {
-    float eff = (s1 * s2) / so;
-    for (int i = 0; i < size; i++) {
-        float v = ((float)in1[i] - z1) * ((float)in2[i] - z2) * eff;
-        out[i] = saturate_int8((int32_t)roundf(v) + zo);
+    float t0 = (s1 * s2) / so;
+    for (volatile int i = 0; i < len; i++) {
+        float t1 = ((float)pin1[i] - z1) * ((float)pin2[i] - z2) * t0;
+        pout[i] = saturate_int8((int32_t)roundf(t1) + zo);
     }
 }
 
-// 平方差
-static void op_squared_diff(const int8_t* in1, const int8_t* in2, int8_t* out, int size,
+// 平方差: pout[i] = (pin1[i] - pin2[i])^2
+static void op_squared_diff(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
                             float s1, int z1, float s2, int z2, float so, int zo) {
-    float eff = (s1 * s1) / so;
-    for (int i = 0; i < size; i++) {
-        float diff = ((float)in1[i] - z1) - ((float)in2[i] - z2) * (s2 / s1);
-        float v = diff * diff * eff;
-        out[i] = saturate_int8((int32_t)roundf(v) + zo);
+    float t0 = (s1 * s1) / so;
+    float t1 = s2 / s1;
+    for (volatile int i = 0; i < len; i++) {
+        float t2 = ((float)pin1[i] - z1) - ((float)pin2[i] - z2) * t1;
+        float t3 = t2 * t2 * t0;
+        pout[i] = saturate_int8((int32_t)roundf(t3) + zo);
     }
 }
 
 // ============== 激活函数 ==============
 
-// 倒数平方根
-static void op_rsqrt(const int8_t* in, int8_t* out, int size,
+// 倒数平方根: pout[i] = 1/sqrt(pin[i])
+static void op_rsqrt(const int8_t* pin, int8_t* pout, int len,
                      float si, int zi, float so, int zo) {
-    for (int i = 0; i < size; i++) {
-        float val = ((float)in[i] - zi) * si;
-        float rsqrt = 1.0f / sqrtf(fmaxf(val, 1e-12f));
-        out[i] = saturate_int8((int32_t)roundf(rsqrt / so) + zo);
+    for (volatile int i = 0; i < len; i++) {
+        float t0 = ((float)pin[i] - zi) * si;
+        float t1 = 1.0f / sqrtf(fmaxf(t0, 1e-12f));
+        pout[i] = saturate_int8((int32_t)roundf(t1 / so) + zo);
     }
 }
 
-// Softmax (沿最后一个维度)
-static void op_softmax(const int8_t* input, int8_t* output, int batch, int classes,
+// Softmax: 沿最后一个维度, 使用指针算术
+static void op_softmax(const int8_t* pin, int8_t* pout, int nbatch, int nclass,
                        float si, int zi, float so, int zo) {
-    float* vals = (float*)malloc(classes * sizeof(float));
-    for (int b = 0; b < batch; b++) {
-        float max_val = -1e9f;
-        for (int c = 0; c < classes; c++) {
-            vals[c] = ((float)input[b*classes + c] - zi) * si;
-            if (vals[c] > max_val) max_val = vals[c];
+    float* pvals = (float*)malloc(nclass << 2);  // nclass * sizeof(float) = nclass * 4
+    for (volatile int b = 0; b < nbatch; b++) {
+        int base = b * nclass;  // 手动偏移计算
+        float t0 = -1e9f;  // max_val
+        // 第一遍: 找最大值并反量化
+        for (volatile int c = 0; c < nclass; c++) {
+            pvals[c] = ((float)*(pin + base + c) - zi) * si;
+            if (pvals[c] > t0) t0 = pvals[c];
         }
-        float sum = 0.0f;
-        for (int c = 0; c < classes; c++) {
-            vals[c] = expf(vals[c] - max_val);
-            sum += vals[c];
+        // 第二遍: exp并求和
+        float t1 = 0.0f;  // sum
+        for (volatile int c = 0; c < nclass; c++) {
+            pvals[c] = expf(pvals[c] - t0);
+            t1 += pvals[c];
         }
-        for (int c = 0; c < classes; c++) {
-            float softmax_val = vals[c] / sum;
-            output[b*classes + c] = saturate_int8((int32_t)roundf(softmax_val / so) + zo);
+        // 第三遍: 归一化并量化输出
+        for (volatile int c = 0; c < nclass; c++) {
+            float t2 = pvals[c] / t1;
+            *(pout + base + c) = saturate_int8((int32_t)roundf(t2 / so) + zo);
         }
     }
-    free(vals);
+    free(pvals);
 }
 
 // ============== 线性操作 ==============
 
-// 全连接层
-static void op_fc(const int8_t* input, int batch, int in_dim, int out_dim,
-                  const int8_t* weight, const int32_t* bias, int8_t* output,
-                  float si, int zi, const float* w_scales, float so, int zo) {
-    for (int b = 0; b < batch; b++) {
-        for (int o = 0; o < out_dim; o++) {
-            int32_t acc = 0;
-            for (int i = 0; i < in_dim; i++) {
-                acc += ((int32_t)input[b * in_dim + i] - zi) * (int32_t)weight[o * in_dim + i];
+// 全连接层: pout = pin @ pweight^T + pbias
+// 优化: 预先计算每个输出通道的缩放因子数组，避免内层循环浮点除法
+// 使用指针算术和手动偏移计算
+static void op_fc(const int8_t* pin, int nbatch, int chn_in, int chn_out,
+                  const int8_t* pweight, const int32_t* pbias, int8_t* pout,
+                  float si, int zi, const float* pscales, float so, int zo) {
+    // ===== 预先计算有效缩放因子数组 (在所有循环外) =====
+    float* pscales_eff = (float*)malloc(chn_out * sizeof(float));
+    float t0 = si / so;  // 公共因子
+    for (volatile int o = 0; o < chn_out; o++) {
+        *(pscales_eff + o) = t0 * *(pscales + o);  // 预计算: (si * pscales[o]) / so
+    }
+    HW_BARRIER();  // 确保预计算完成
+    
+    // ===== 主计算循环 (无浮点除法) =====
+    for (volatile int b = 0; b < nbatch; b++) {
+        int in_base = b * chn_in;      // 输入基址偏移
+        int out_base = b * chn_out;    // 输出基址偏移
+        for (volatile int o = 0; o < chn_out; o++) {
+            int32_t t1 = 0;  // 累加器
+            int w_base = o * chn_in;   // 权重行基址
+            // MAC操作: 使用指针算术
+            for (volatile int i = 0; i < chn_in; i++) {
+                int32_t t2 = (int32_t)*(pin + in_base + i) - zi;
+                int32_t t3 = (int32_t)*(pweight + w_base + i);
+                t1 += t2 * t3;
             }
-            if (bias) acc += bias[o];
-            float scale = (si * w_scales[o]) / so;
-            output[b * out_dim + o] = saturate_int8((int32_t)roundf(acc * scale) + zo);
+            // 加偏置
+            if (pbias) t1 += *(pbias + o);
+            // 量化输出: 使用预计算的缩放因子 (仅乘法，无除法)
+            *(pout + out_base + o) = saturate_int8((int32_t)roundf(t1 * *(pscales_eff + o)) + zo);
         }
     }
+    free(pscales_eff);
 }
 
-// 批量矩阵乘法
-static void op_batch_matmul(const int8_t* in1, const int8_t* in2, int8_t* out,
-                            int batch, int m, int k, int n,
+// 批量矩阵乘法: pout[b] = pin1[b] @ pin2[b]
+// 维度: [nbatch, side_m, side_k] @ [nbatch, side_k, side_n] -> [nbatch, side_m, side_n]
+// 优化: 浮点缩放转换为定点乘数+移位，彻底消除内层浮点运算
+static void op_batch_matmul(const int8_t* pin1, const int8_t* pin2, int8_t* pout,
+                            int nbatch, int side_m, int side_k, int side_n,
                             float s1, int z1, float s2, int z2, float so, int zo) {
-    float eff = (s1 * s2) / so;
-    for (int b = 0; b < batch; b++) {
-        for (int i = 0; i < m; i++) {
-            for (int j = 0; j < n; j++) {
-                int32_t acc = 0;
-                for (int l = 0; l < k; l++) {
-                    acc += ((int32_t)in1[b*m*k + i*k + l] - z1) * 
-                           ((int32_t)in2[b*k*n + l*n + j] - z2);
+    // ===== 预计算: 将浮点缩放转换为定点乘数+移位 =====
+    // 原: t1 * ((s1 * s2) / so)
+    // 优化: (t1 * multiplier) >> shift
+    float t0 = (s1 * s2) / so;  // 有效缩放因子
+    int shift = 15;  // 定点小数位数 (Q15格式)
+    int32_t multiplier = (int32_t)roundf(t0 * (1 << shift));  // 定点乘数
+    HW_BARRIER();  // 确保预计算完成
+    
+    // 预计算 stride (整数计算，无浮点)
+    int stride1_b = side_m * side_k;  // pin1 batch stride
+    int stride2_b = side_k * side_n;  // pin2 batch stride
+    int stride_out = side_m * side_n; // pout batch stride
+    
+    // ===== 主计算循环 (纯整数运算) =====
+    for (volatile int b = 0; b < nbatch; b++) {
+        int base1 = b * stride1_b;
+        int base2 = b * stride2_b;
+        int base_out = b * stride_out;
+        
+        for (volatile int i = 0; i < side_m; i++) {
+            for (volatile int j = 0; j < side_n; j++) {
+                int32_t t1 = 0;  // 累加器
+                // 内积计算
+                for (volatile int l = 0; l < side_k; l++) {
+                    // 手动计算偏移: pin1[b,i,l] = pin1[base1 + i*side_k + l]
+                    //               pin2[b,l,j] = pin2[base2 + l*side_n + j]
+                    int32_t t2 = (int32_t)*(pin1 + base1 + i * side_k + l) - z1;
+                    int32_t t3 = (int32_t)*(pin2 + base2 + l * side_n + j) - z2;
+                    t1 += t2 * t3;
                 }
-                out[b*m*n + i*n + j] = saturate_int8((int32_t)roundf(acc * eff) + zo);
+                // 定点量化: (t1 * multiplier) >> shift + zo
+                // 使用64位中间结果防止溢出
+                int64_t t4 = ((int64_t)t1 * (int64_t)multiplier) >> shift;
+                *(pout + base_out + i * side_n + j) = saturate_int8((int32_t)t4 + zo);
             }
         }
     }
@@ -556,68 +664,119 @@ static void op_batch_matmul(const int8_t* in1, const int8_t* in2, int8_t* out,
 
 // ============== 归约操作 ==============
 
-// 均值
-static void op_mean(const int8_t* input, int8_t* output,
-                    int outer, int reduce_size, int inner,
+// 均值: 沿指定维度求平均
+// outer: 外层循环次数, reduce_len: 归约长度, inner: 内层循环次数
+static void op_mean(const int8_t* pin, int8_t* pout,
+                    int outer, int reduce_len, int inner,
                     float si, int zi, float so, int zo) {
-    float scale_ratio = si / so;
-    for (int o = 0; o < outer; o++) {
-        for (int i = 0; i < inner; i++) {
-            int32_t sum = 0;
-            for (int r = 0; r < reduce_size; r++) {
-                sum += input[o * reduce_size * inner + r * inner + i];
+    float t0 = si / so;  // 缩放比
+    int reduce_stride = inner;  // 归约维度步长
+    
+    for (volatile int o = 0; o < outer; o++) {
+        int in_base = o * reduce_len * inner;
+        int out_base = o * inner;
+        for (volatile int i = 0; i < inner; i++) {
+            int32_t t1 = 0;  // 累加器
+            // 沿归约维度求和
+            for (volatile int r = 0; r < reduce_len; r++) {
+                t1 += *(pin + in_base + r * reduce_stride + i);
             }
-            int32_t mean = sum / reduce_size;
-            output[o * inner + i] = saturate_int8((int32_t)roundf((mean - zi) * scale_ratio) + zo);
+            // 计算均值: 尝试使用位移 (若reduce_len为2的幂)
+            int32_t t2;
+            // 对常见2^n值使用位移
+            switch (reduce_len) {
+                case 2:   t2 = t1 >> 1;  break;
+                case 4:   t2 = t1 >> 2;  break;
+                case 8:   t2 = t1 >> 3;  break;
+                case 16:  t2 = t1 >> 4;  break;
+                case 32:  t2 = t1 >> 5;  break;
+                case 64:  t2 = t1 >> 6;  break;
+                case 128: t2 = t1 >> 7;  break;
+                case 256: t2 = t1 >> 8;  break;
+                default:  t2 = t1 / reduce_len;  break;
+            }
+            *(pout + out_base + i) = saturate_int8((int32_t)roundf((t2 - zi) * t0) + zo);
         }
     }
 }
 
 // ============== 形状操作 ==============
 
-// Reshape/复制
-static void op_copy(const int8_t* in, int8_t* out, int size) {
-    if (in != out) memcpy(out, in, size);
+// 数据复制 (Reshape等)
+static void op_copy(const int8_t* pin, int8_t* pout, int len) {
+    if (pin != pout) memcpy(pout, pin, len);
 }
 
-// Transpose 3D
-static void op_transpose_3d(const int8_t* in, int8_t* out,
-                            int d0, int d1, int d2, int p0, int p1, int p2) {
-    int dims[3] = {d0, d1, d2};
-    int perm[3] = {p0, p1, p2};
-    int new_d[3] = {dims[perm[0]], dims[perm[1]], dims[perm[2]]};
+// Transpose 3D: [d0, d1, d2] -> [perm[0], perm[1], perm[2]]
+// 使用手动偏移计算
+static void op_transpose_3d(const int8_t* pin, int8_t* pout,
+                            int side0, int side1, int side2, 
+                            int perm0, int perm1, int perm2) {
+    int sides[3] = {side0, side1, side2};
+    int perm[3] = {perm0, perm1, perm2};
+    int new_sides[3] = {sides[perm[0]], sides[perm[1]], sides[perm[2]]};
     
-    for (int i0 = 0; i0 < d0; i0++) {
-        for (int i1 = 0; i1 < d1; i1++) {
-            for (int i2 = 0; i2 < d2; i2++) {
-                int in_idx = i0 * d1 * d2 + i1 * d2 + i2;
-                int old[3] = {i0, i1, i2};
-                int new_idx = old[perm[0]] * new_d[1] * new_d[2] + 
-                              old[perm[1]] * new_d[2] + old[perm[2]];
-                out[new_idx] = in[in_idx];
+    // 输入步长
+    int stride_in1 = side2;
+    int stride_in0 = side1 * side2;
+    // 输出步长
+    int stride_out1 = new_sides[2];
+    int stride_out0 = new_sides[1] * new_sides[2];
+    
+    for (volatile int i0 = 0; i0 < side0; i0++) {
+        for (volatile int i1 = 0; i1 < side1; i1++) {
+            for (volatile int i2 = 0; i2 < side2; i2++) {
+                // 输入偏移
+                int in_off = i0 * stride_in0 + i1 * stride_in1 + i2;
+                // 构建新索引
+                int old_idx[3] = {i0, i1, i2};
+                int new_idx[3];
+                new_idx[0] = old_idx[perm[0]];
+                new_idx[1] = old_idx[perm[1]];
+                new_idx[2] = old_idx[perm[2]];
+                // 输出偏移
+                int out_off = new_idx[0] * stride_out0 + new_idx[1] * stride_out1 + new_idx[2];
+                *(pout + out_off) = *(pin + in_off);
             }
         }
     }
 }
 
-// Transpose 4D
-static void op_transpose_4d(const int8_t* in, int8_t* out,
-                            int d0, int d1, int d2, int d3, 
-                            int p0, int p1, int p2, int p3) {
-    int dims[4] = {d0, d1, d2, d3};
-    int perm[4] = {p0, p1, p2, p3};
-    int new_d[4] = {dims[perm[0]], dims[perm[1]], dims[perm[2]], dims[perm[3]]};
+// Transpose 4D: [d0, d1, d2, d3] -> [perm[0], perm[1], perm[2], perm[3]]
+// 使用手动偏移计算和volatile循环变量
+static void op_transpose_4d(const int8_t* pin, int8_t* pout,
+                            int side0, int side1, int side2, int side3, 
+                            int perm0, int perm1, int perm2, int perm3) {
+    int sides[4] = {side0, side1, side2, side3};
+    int perm[4] = {perm0, perm1, perm2, perm3};
+    int new_sides[4] = {sides[perm[0]], sides[perm[1]], sides[perm[2]], sides[perm[3]]};
     
-    for (int i0 = 0; i0 < d0; i0++) {
-        for (int i1 = 0; i1 < d1; i1++) {
-            for (int i2 = 0; i2 < d2; i2++) {
-                for (int i3 = 0; i3 < d3; i3++) {
-                    int in_idx = i0*d1*d2*d3 + i1*d2*d3 + i2*d3 + i3;
-                    int old[4] = {i0, i1, i2, i3};
-                    int new_idx = old[perm[0]]*new_d[1]*new_d[2]*new_d[3] + 
-                                  old[perm[1]]*new_d[2]*new_d[3] + 
-                                  old[perm[2]]*new_d[3] + old[perm[3]];
-                    out[new_idx] = in[in_idx];
+    // 输入步长计算
+    int stride_in2 = side3;
+    int stride_in1 = side2 * side3;
+    int stride_in0 = side1 * side2 * side3;
+    // 输出步长计算
+    int stride_out2 = new_sides[3];
+    int stride_out1 = new_sides[2] * new_sides[3];
+    int stride_out0 = new_sides[1] * new_sides[2] * new_sides[3];
+    
+    for (volatile int i0 = 0; i0 < side0; i0++) {
+        for (volatile int i1 = 0; i1 < side1; i1++) {
+            for (volatile int i2 = 0; i2 < side2; i2++) {
+                for (volatile int i3 = 0; i3 < side3; i3++) {
+                    // 输入偏移: pin[i0, i1, i2, i3]
+                    int in_off = i0 * stride_in0 + i1 * stride_in1 + i2 * stride_in2 + i3;
+                    // 构建新索引
+                    int old_idx[4] = {i0, i1, i2, i3};
+                    int new_idx[4];
+                    new_idx[0] = old_idx[perm[0]];
+                    new_idx[1] = old_idx[perm[1]];
+                    new_idx[2] = old_idx[perm[2]];
+                    new_idx[3] = old_idx[perm[3]];
+                    // 输出偏移: pout[new_idx[0], new_idx[1], new_idx[2], new_idx[3]]
+                    int out_off = new_idx[0] * stride_out0 + new_idx[1] * stride_out1 + 
+                                  new_idx[2] * stride_out2 + new_idx[3];
+                    *(pout + out_off) = *(pin + in_off);
                 }
             }
         }
@@ -633,7 +792,7 @@ static void op_transpose_4d(const int8_t* in, int8_t* out,
         print(f"  生成: ecgformer_ops.h")
     
     def _generate_main_source(self, output_dir: str):
-        """生成主程序源文件"""
+        """生成主程序源文件 - Bare-metal Hardware Verification Style"""
         input_tid = self.input_details[0]['index']
         output_tid = self.output_details[0]['index']
         
@@ -646,11 +805,17 @@ static void op_transpose_4d(const int8_t* in, int8_t* out,
                 offset += self.tensors_info[tid]['size']
         
         code = '''/**
- * ECGformer INT8 主程序
+ * ECGformer INT8 主程序 - Bare-metal Hardware Verification Style
  * 自动生成 - 请勿手动修改
  * 
  * 编译: gcc -O3 -o ecgformer ecgformer_model.c -lm
+ *       riscv64-unknown-elf-gcc -O3 -o ecgformer ecgformer_model.c -lm
  * 共享库: gcc -O3 -shared -fPIC -DBUILD_SHARED_LIB -o libecgformer.so ecgformer_model.c -lm
+ * 
+ * 命名约定:
+ *   - 指针: p前缀 (pinput, poutput, ptensors)
+ *   - 临时变量: t0, t1, t2... (模拟寄存器)
+ *   - 无null检查, 直接指针算术
  */
 
 #include <stdio.h>
@@ -666,42 +831,48 @@ static void op_transpose_4d(const int8_t* in, int8_t* out,
 #include "ecgformer_quant.h"
 #include "ecgformer_ops.h"
 
-// ============== 张量存储 ==============
+// ============== 张量存储 - Bare-metal Style ==============
 
-// 激活张量存储池
-static int8_t activation_pool[ACTIVATION_POOL_SIZE];
+// 激活张量内存池 (扁平分配)
+static int8_t g_activation_pool[ACTIVATION_POOL_SIZE];
 
-// 张量指针
-static int8_t* tensors[NUM_TENSORS];
+// 张量指针数组 (扁平int8_t*)
+static int8_t* ptensors[NUM_TENSORS];
 
-// 初始化张量指针
+// 初始化张量指针 (无null检查, 直接赋值)
 static void init_tensors(void) {
 '''
         
-        # 常量张量指向静态数组
+        # 常量张量指向静态数组 (使用指针算术)
         for tid in sorted(self.constant_tensors):
             if tid not in self.weights_data:
                 continue
             info = self.tensors_info[tid]
             dtype = info['dtype']
             if 'int8' in dtype:
-                code += f'    tensors[{tid}] = (int8_t*)weight_t{tid};\n'
+                code += f'    *(ptensors + {tid}) = (int8_t*)weight_t{tid};\n'
             elif 'int32' in dtype:
-                code += f'    tensors[{tid}] = (int8_t*)bias_t{tid};\n'
+                code += f'    *(ptensors + {tid}) = (int8_t*)bias_t{tid};\n'
         
-        # 激活张量指向存储池
+        # 激活张量指向存储池 (使用指针算术)
         for tid in sorted(self.activation_tensors):
             if tid in offsets:
-                code += f'    tensors[{tid}] = &activation_pool[{offsets[tid]}];\n'
+                code += f'    *(ptensors + {tid}) = g_activation_pool + {offsets[tid]};\n'
         
-        code += '''}\n
+        code += '''    HW_BARRIER();  // 内存屏障确保初始化完成
+}
+
 // ============== 推理函数 ==============
 
-int ecgformer_inference(const float* input_float, float* output_probs) {
-    // 量化输入
-    for (int i = 0; i < INPUT_SIZE; i++) {
-        tensors[''' + str(input_tid) + '''][i] = quantize_float(input_float[i], INPUT_SCALE, INPUT_ZERO_POINT);
+int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
+    int8_t* pin = *(ptensors + ''' + str(input_tid) + ''');
+    
+    // 量化输入: 使用指针算术和volatile循环
+    for (volatile int i = 0; i < INPUT_SIZE; i++) {
+        float t0 = *(pinput_float + i);
+        *(pin + i) = quantize_float(t0, INPUT_SCALE, INPUT_ZERO_POINT);
     }
+    HW_BARRIER();
     
 '''
         
@@ -712,21 +883,25 @@ int ecgformer_inference(const float* input_float, float* output_probs) {
         # 输出处理
         code += f'''
     // 反量化输出并找预测类别
-    int pred = 0;
-    float max_prob = -1e9f;
-    for (int i = 0; i < OUTPUT_CLASSES; i++) {{
-        output_probs[i] = dequantize_int8(tensors[{output_tid}][i], OUTPUT_SCALE, OUTPUT_ZERO_POINT);
-        if (output_probs[i] > max_prob) {{
-            max_prob = output_probs[i];
-            pred = i;
+    int8_t* pout = *(ptensors + {output_tid});
+    int t0 = 0;  // pred
+    float t1 = -1e9f;  // max_prob
+    for (volatile int i = 0; i < OUTPUT_CLASSES; i++) {{
+        float t2 = dequantize_int8(*(pout + i), OUTPUT_SCALE, OUTPUT_ZERO_POINT);
+        *(poutput_probs + i) = t2;
+        if (t2 > t1) {{
+            t1 = t2;
+            t0 = i;
         }}
     }}
-    return pred;
+    return t0;
 }}
 
-// 获取INT8输出（用于验证）
-void ecgformer_get_int8_output(int8_t* output) {{
-    memcpy(output, tensors[{output_tid}], OUTPUT_CLASSES);
+// 获取INT8输出 (用于硬件验证)
+void ecgformer_get_int8_output(int8_t* poutput) {{
+    int8_t* psrc = *(ptensors + {output_tid});
+    // 使用memcpy替代循环
+    memcpy(poutput, psrc, OUTPUT_CLASSES);
 }}
 
 // ============== 共享库接口 ==============
@@ -742,12 +917,12 @@ EXPORT void c_init(void) {{
     init_tensors();
 }}
 
-EXPORT int c_inference(const float* input, float* output) {{
-    return ecgformer_inference(input, output);
+EXPORT int c_inference(const float* pinput, float* poutput) {{
+    return ecgformer_inference(pinput, poutput);
 }}
 
-EXPORT void c_get_int8_output(int8_t* output) {{
-    ecgformer_get_int8_output(output);
+EXPORT void c_get_int8_output(int8_t* poutput) {{
+    ecgformer_get_int8_output(poutput);
 }}
 #endif
 
@@ -757,25 +932,27 @@ EXPORT void c_get_int8_output(int8_t* output) {{
 int main(int argc, char* argv[]) {{
     init_tensors();
     
-    printf("ECGformer INT8 模块化C实现\\n");
-    printf("==============================\\n");
+    printf("ECGformer INT8 Bare-metal C Implementation\\n");
+    printf("==========================================\\n");
     
-    // 测试用随机输入
-    float test_input[INPUT_SIZE];
-    for (int i = 0; i < INPUT_SIZE; i++) {{
-        test_input[i] = ((float)rand() / RAND_MAX - 0.5f);
+    // 测试用随机输入 (使用malloc, 无null检查)
+    float* ptest_input = (float*)malloc(INPUT_SIZE << 2);  // INPUT_SIZE * 4
+    for (volatile int i = 0; i < INPUT_SIZE; i++) {{
+        *(ptest_input + i) = ((float)rand() / RAND_MAX - 0.5f);
     }}
     
     // 推理
-    float output_probs[OUTPUT_CLASSES];
-    int pred = ecgformer_inference(test_input, output_probs);
+    float* poutput_probs = (float*)malloc(OUTPUT_CLASSES << 2);  // OUTPUT_CLASSES * 4
+    int t0 = ecgformer_inference(ptest_input, poutput_probs);
     
-    printf("\\n预测结果:\\n");
-    for (int i = 0; i < OUTPUT_CLASSES; i++) {{
-        printf("  类别 %d (%s): %.4f%s\\n", i, CLASS_NAMES[i], output_probs[i],
-               i == pred ? " <-- 预测" : "");
+    printf("\\nPrediction Results:\\n");
+    for (volatile int i = 0; i < OUTPUT_CLASSES; i++) {{
+        printf("  Class %d (%s): %.4f%s\\n", i, CLASS_NAMES[i], *(poutput_probs + i),
+               i == t0 ? " <-- Predicted" : "");
     }}
     
+    free(ptest_input);
+    free(poutput_probs);
     return 0;
 }}
 #endif
@@ -787,7 +964,9 @@ int main(int argc, char* argv[]) {{
         print(f"  生成: ecgformer_model.c")
     
     def _generate_op_code_modular(self, op):
-        """为单个操作生成代码（模块化版本，使用头文件中的数组名）"""
+        """为单个操作生成代码 - Bare-metal Style (模块化版本)
+        使用ptensors指针数组, pscales_t* per-channel scales
+        """
         op_id = op['id']
         op_type = op['type']
         inputs = op['inputs']
@@ -803,11 +982,11 @@ int main(int argc, char* argv[]) {{
         
         if op_type == 'RESHAPE':
             in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
-            code += f'    op_copy(tensors[{inputs[0]}], tensors[{out_tid}], {in_size});\n'
+            code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {in_size});\n'
         
         elif op_type == 'EXPAND_DIMS':
             in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
-            code += f'    op_copy(tensors[{inputs[0]}], tensors[{out_tid}], {in_size});\n'
+            code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {in_size});\n'
         
         elif op_type == 'TRANSPOSE':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -815,49 +994,49 @@ int main(int argc, char* argv[]) {{
             perm = self.weights_data.get(perm_tid, np.arange(len(in_shape))).flatten().tolist()
             
             if len(in_shape) == 3:
-                code += f'    op_transpose_3d(tensors[{inputs[0]}], tensors[{out_tid}], '
+                code += f'    op_transpose_3d(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), '
                 code += f'{in_shape[0]}, {in_shape[1]}, {in_shape[2]}, '
                 code += f'{int(perm[0])}, {int(perm[1])}, {int(perm[2])});\n'
             elif len(in_shape) == 4:
-                code += f'    op_transpose_4d(tensors[{inputs[0]}], tensors[{out_tid}], '
+                code += f'    op_transpose_4d(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), '
                 code += f'{in_shape[0]}, {in_shape[1]}, {in_shape[2]}, {in_shape[3]}, '
                 code += f'{int(perm[0])}, {int(perm[1])}, {int(perm[2])}, {int(perm[3])});\n'
             else:
-                code += f'    op_copy(tensors[{inputs[0]}], tensors[{out_tid}], {out_size});\n'
+                code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {out_size});\n'
         
         elif op_type == 'ADD':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
-            code += f'    op_add(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}], {out_size},\n'
+            code += f'    op_add(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
             code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'SUB':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
             if inputs[0] == inputs[1]:
-                code += f'    memset(tensors[{out_tid}], {out_zp}, {out_size});\n'
+                code += f'    memset(*(ptensors + {out_tid}), {out_zp}, {out_size});\n'
             else:
-                code += f'    op_sub(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}], {out_size},\n'
+                code += f'    op_sub(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
                 code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'MUL':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
-            code += f'    op_mul(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}], {out_size},\n'
+            code += f'    op_mul(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
             code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'SQUARED_DIFFERENCE':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
             if inputs[0] == inputs[1]:
-                code += f'    memset(tensors[{out_tid}], {out_zp}, {out_size});\n'
+                code += f'    memset(*(ptensors + {out_tid}), {out_zp}, {out_size});\n'
             else:
-                code += f'    op_squared_diff(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}], {out_size},\n'
+                code += f'    op_squared_diff(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
                 code += f'                    {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'RSQRT':
             si, zi = self._get_scale_zp(inputs[0])
-            code += f'    op_rsqrt(tensors[{inputs[0]}], tensors[{out_tid}], {out_size},\n'
+            code += f'    op_rsqrt(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {out_size},\n'
             code += f'             {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'FULLY_CONNECTED':
@@ -866,30 +1045,32 @@ int main(int argc, char* argv[]) {{
             weight_shape = self.tensors_info.get(weight_tid, {}).get('shape', ())
             
             si, zi = self._get_scale_zp(inputs[0])
-            in_dim = in_shape[-1] if len(in_shape) > 0 else 1
-            batch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
-            out_dim = weight_shape[0] if len(weight_shape) > 0 else 1
+            chn_in = in_shape[-1] if len(in_shape) > 0 else 1
+            nbatch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
+            chn_out = weight_shape[0] if len(weight_shape) > 0 else 1
             
             has_bias = len(inputs) > 2
-            bias_str = f'(const int32_t*)tensors[{inputs[2]}]' if has_bias else 'NULL'
+            pbias_str = f'(const int32_t*)*(ptensors + {inputs[2]})' if has_bias else 'NULL'
             
             # 检查是否有per-channel scales
             weight_info = self.tensors_info.get(weight_tid, {})
             weight_scales = weight_info.get('scales', np.array([]))
             
             if len(weight_scales) > 1:
-                scales_str = f'scales_t{weight_tid}'
+                pscales_str = f'pscales_t{weight_tid}'
             else:
                 single_scale = weight_scales[0] if len(weight_scales) > 0 else 1.0
-                code += f'    {{ float ws[{out_dim}]; for(int i=0;i<{out_dim};i++) ws[i]={single_scale:.10e}f;\n'
-                scales_str = 'ws'
+                # 使用malloc分配临时scale数组 (无null检查)
+                code += f'    {{ float* pws = (float*)malloc({chn_out} << 2);\n'
+                code += f'      for(volatile int t0=0; t0<{chn_out}; t0++) *(pws+t0)={single_scale:.10e}f;\n'
+                pscales_str = 'pws'
             
-            code += f'    op_fc(tensors[{inputs[0]}], {batch}, {in_dim}, {out_dim},\n'
-            code += f'          (const int8_t*)tensors[{weight_tid}], {bias_str}, tensors[{out_tid}],\n'
-            code += f'          {si:.10e}f, {zi}, {scales_str}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'    op_fc(*(ptensors + {inputs[0]}), {nbatch}, {chn_in}, {chn_out},\n'
+            code += f'          (const int8_t*)*(ptensors + {weight_tid}), {pbias_str}, *(ptensors + {out_tid}),\n'
+            code += f'          {si:.10e}f, {zi}, {pscales_str}, {out_scale:.10e}f, {out_zp});\n'
             
             if len(weight_scales) <= 1:
-                code += '    }\n'
+                code += '      free(pws); }\n'
         
         elif op_type == 'CONV_2D':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -897,29 +1078,30 @@ int main(int argc, char* argv[]) {{
             weight_shape = self.tensors_info.get(weight_tid, {}).get('shape', ())
             
             si, zi = self._get_scale_zp(inputs[0])
-            c_in = in_shape[-1] if len(in_shape) > 0 else 1
+            chn_in = in_shape[-1] if len(in_shape) > 0 else 1
             spatial = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
-            c_out = weight_shape[0] if len(weight_shape) > 0 else 1
+            chn_out = weight_shape[0] if len(weight_shape) > 0 else 1
             
             has_bias = len(inputs) > 2
-            bias_str = f'(const int32_t*)tensors[{inputs[2]}]' if has_bias else 'NULL'
+            pbias_str = f'(const int32_t*)*(ptensors + {inputs[2]})' if has_bias else 'NULL'
             
             weight_info = self.tensors_info.get(weight_tid, {})
             weight_scales = weight_info.get('scales', np.array([]))
             
             if len(weight_scales) > 1:
-                scales_str = f'scales_t{weight_tid}'
+                pscales_str = f'pscales_t{weight_tid}'
             else:
                 single_scale = weight_scales[0] if len(weight_scales) > 0 else 1.0
-                code += f'    {{ float ws[{c_out}]; for(int i=0;i<{c_out};i++) ws[i]={single_scale:.10e}f;\n'
-                scales_str = 'ws'
+                code += f'    {{ float* pws = (float*)malloc({chn_out} << 2);\n'
+                code += f'      for(volatile int t0=0; t0<{chn_out}; t0++) *(pws+t0)={single_scale:.10e}f;\n'
+                pscales_str = 'pws'
             
-            code += f'    op_fc(tensors[{inputs[0]}], {spatial}, {c_in}, {c_out},\n'
-            code += f'          (const int8_t*)tensors[{weight_tid}], {bias_str}, tensors[{out_tid}],\n'
-            code += f'          {si:.10e}f, {zi}, {scales_str}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'    op_fc(*(ptensors + {inputs[0]}), {spatial}, {chn_in}, {chn_out},\n'
+            code += f'          (const int8_t*)*(ptensors + {weight_tid}), {pbias_str}, *(ptensors + {out_tid}),\n'
+            code += f'          {si:.10e}f, {zi}, {pscales_str}, {out_scale:.10e}f, {out_zp});\n'
             
             if len(weight_scales) <= 1:
-                code += '    }\n'
+                code += '      free(pws); }\n'
         
         elif op_type == 'BATCH_MATMUL':
             in1_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -927,13 +1109,13 @@ int main(int argc, char* argv[]) {{
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
             
-            batch = in1_shape[0] if len(in1_shape) > 2 else 1
-            m = in1_shape[1] if len(in1_shape) > 1 else 1
-            k = in1_shape[2] if len(in1_shape) > 2 else in1_shape[1] if len(in1_shape) > 1 else 1
-            n = in2_shape[2] if len(in2_shape) > 2 else in2_shape[1] if len(in2_shape) > 1 else 1
+            nbatch = in1_shape[0] if len(in1_shape) > 2 else 1
+            side_m = in1_shape[1] if len(in1_shape) > 1 else 1
+            side_k = in1_shape[2] if len(in1_shape) > 2 else in1_shape[1] if len(in1_shape) > 1 else 1
+            side_n = in2_shape[2] if len(in2_shape) > 2 else in2_shape[1] if len(in2_shape) > 1 else 1
             
-            code += f'    op_batch_matmul(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}],\n'
-            code += f'                    {batch}, {m}, {k}, {n},\n'
+            code += f'    op_batch_matmul(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}),\n'
+            code += f'                    {nbatch}, {side_m}, {side_k}, {side_n},\n'
             code += f'                    {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'MEAN':
@@ -941,42 +1123,57 @@ int main(int argc, char* argv[]) {{
             si, zi = self._get_scale_zp(inputs[0])
             
             outer = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
-            reduce_size = in_shape[-1] if len(in_shape) > 0 else 1
+            reduce_len = in_shape[-1] if len(in_shape) > 0 else 1
             inner = 1
             
-            code += f'    op_mean(tensors[{inputs[0]}], tensors[{out_tid}],\n'
-            code += f'            {outer}, {reduce_size}, {inner},\n'
+            code += f'    op_mean(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}),\n'
+            code += f'            {outer}, {reduce_len}, {inner},\n'
             code += f'            {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'SOFTMAX':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
             si, zi = self._get_scale_zp(inputs[0])
-            batch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
-            classes = in_shape[-1] if len(in_shape) > 0 else 1
+            nbatch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
+            nclass = in_shape[-1] if len(in_shape) > 0 else 1
             
-            code += f'    op_softmax(tensors[{inputs[0]}], tensors[{out_tid}], {batch}, {classes},\n'
+            code += f'    op_softmax(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {nbatch}, {nclass},\n'
             code += f'               {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
         
         else:
-            code += f'    // TODO: 实现 {op_type}\n'
+            code += f'    // TODO: Implement {op_type}\n'
         
         code += '\n'
         return code
     
     def _generate_header(self):
-        """生成文件头"""
+        """生成文件头 - Bare-metal Hardware Verification Style"""
         input_shape = tuple(self.input_details[0]['shape'])
         output_shape = tuple(self.output_details[0]['shape'])
         input_scale, input_zp = self._get_scale_zp(self.input_details[0]['index'])
         output_scale, output_zp = self._get_scale_zp(self.output_details[0]['index'])
         
         return f'''/**
- * ECGformer INT8 完整C实现
- * 自动生成 - 纯C实现，无外部依赖
+ * ECGformer INT8 Bare-metal C Implementation
+ * Auto-generated for Hardware Verification
  * 
- * 编译: gcc -O3 -o ecgformer ecgformer_standalone.c -lm
- * 运行: ./ecgformer
- * 或者编译为共享库供Python调用: gcc -O3 -shared -fPIC -DBUILD_SHARED_LIB -o libecgformer.so ecgformer_standalone.c -lm
+ * Target: Custom RISC-V AI Accelerator
+ * 
+ * Build (GCC):
+ *   gcc -O3 -o ecgformer ecgformer_standalone.c -lm
+ * Build (RISC-V):
+ *   riscv64-unknown-elf-gcc -O3 -o ecgformer ecgformer_standalone.c -lm
+ * Shared Library:
+ *   gcc -O3 -shared -fPIC -DBUILD_SHARED_LIB -o libecgformer.so ecgformer_standalone.c -lm
+ * 
+ * Coding Style:
+ *   - Pointers: p prefix (pinput, poutput, ptensors)
+ *   - Dimensions: side (inside, oside, fside)
+ *   - Channels: chn_in, chn_out
+ *   - Temps: t0, t1, t2... (mimic registers)
+ *   - No structs: flat int8_t* pointers only
+ *   - Bitwise ops: >> << instead of / * where possible
+ *   - Volatile loops: for hardware interaction
+ *   - Manual offset calculation: base + y*stride + x
  */
 
 #include <stdio.h>
@@ -996,7 +1193,7 @@ int main(int argc, char* argv[]) {{
 #define OUTPUT_SCALE {output_scale:.10e}f
 #define OUTPUT_ZERO_POINT {output_zp}
 
-static const char* CLASS_NAMES[5] = {{"N (正常)", "S (室上性)", "V (室性)", "F (融合)", "Q (未知)"}};
+static const char* CLASS_NAMES[5] = {{"N (Normal)", "S (SVEB)", "V (VEB)", "F (Fusion)", "Q (Unknown)"}};
 
 '''
     
@@ -1059,7 +1256,7 @@ static const char* CLASS_NAMES[5] = {{"N (正常)", "S (室上性)", "V (室性)
         return code
     
     def _generate_tensor_storage(self):
-        """生成张量存储"""
+        """生成张量存储 - Bare-metal Style (扁平指针数组)"""
         # 计算激活张量总大小
         total_size = sum(self.tensors_info[tid]['size'] 
                         for tid in self.activation_tensors 
@@ -1073,219 +1270,323 @@ static const char* CLASS_NAMES[5] = {{"N (正常)", "S (室上性)", "V (室性)
                 offsets[tid] = offset
                 offset += self.tensors_info[tid]['size']
         
-        code = f'''// ============== 张量存储 ==============
+        code = f'''// ============== 张量存储 - Bare-metal Style ==============
+// 使用扁平int8_t*指针数组, 手动偏移计算
 
-// 激活张量存储池 ({total_size} bytes)
-static int8_t activation_pool[{total_size}];
+// 激活张量内存池 ({total_size} bytes)
+static int8_t g_activation_pool[{total_size}];
 
-// 张量指针
-static int8_t* tensors[NUM_TENSORS];
+// 张量指针数组 (扁平int8_t*)
+static int8_t* ptensors[NUM_TENSORS];
 
-// 初始化张量指针
+// 初始化张量指针 (无null检查, 直接赋值)
 static void init_tensors(void) {{
 '''
         
-        # 常量张量指向静态数组
+        # 常量张量指向静态数组 (使用bare-metal命名)
         for tid in sorted(self.constant_tensors):
             if tid in self.weights_data:
-                code += f'    tensors[{tid}] = (int8_t*)const_t{tid};\n'
+                code += f'    *(ptensors + {tid}) = (int8_t*)const_t{tid};\n'
         
-        # 激活张量指向存储池
+        # 激活张量指向存储池 (使用指针算术)
         for tid in sorted(self.activation_tensors):
             if tid in offsets:
-                code += f'    tensors[{tid}] = &activation_pool[{offsets[tid]}];\n'
+                code += f'    *(ptensors + {tid}) = g_activation_pool + {offsets[tid]};\n'
         
-        code += '}\n\n'
+        code += '''    HW_BARRIER();  // 确保初始化完成
+}
+
+'''
         return code
     
     def _generate_ops(self):
-        """生成操作函数"""
-        return '''// ============== 操作实现 ==============
+        """生成操作函数 - Bare-metal Hardware Verification Style"""
+        return '''// ============== Bare-metal Hardware Verification Style ==============
+// 命名约定: p前缀指针, side维度, chn通道, t0/t1临时变量
+// 优化: 位移替代除法/乘法, volatile循环变量, 手动偏移计算
 
-static inline int8_t saturate_int8(int32_t value) {
-    if (value > 127) return 127;
-    if (value < -128) return -128;
-    return (int8_t)value;
+// 位移宏 (替代2的幂次除法/乘法)
+#define DIV2(x)   ((x) >> 1)
+#define DIV4(x)   ((x) >> 2)
+#define DIV8(x)   ((x) >> 3)
+#define DIV16(x)  ((x) >> 4)
+#define DIV32(x)  ((x) >> 5)
+#define DIV64(x)  ((x) >> 6)
+#define DIV128(x) ((x) >> 7)
+#define DIV256(x) ((x) >> 8)
+
+#define MUL2(x)   ((x) << 1)
+#define MUL4(x)   ((x) << 2)
+#define MUL8(x)   ((x) << 3)
+#define MUL16(x)  ((x) << 4)
+#define MUL32(x)  ((x) << 5)
+#define MUL64(x)  ((x) << 6)
+
+// RISC-V 自定义指令宏
+#define HW_BARRIER()  asm volatile("" ::: "memory")
+#define HW_NOP()      asm volatile("nop")
+#define HW_MAC_INIT(acc)      asm volatile(".insn r 0x0b, 0x0, 0x00, %0, x0, x0" : "=r"(acc))
+#define HW_MAC_ACC(acc, a, b) asm volatile(".insn r 0x0b, 0x1, 0x00, %0, %1, %2" : "+r"(acc) : "r"(a), "r"(b))
+#define HW_QUANT(out, in, s)  asm volatile(".insn r 0x0b, 0x2, 0x00, %0, %1, %2" : "=r"(out) : "r"(in), "r"(s))
+
+// ============== 操作实现 ==============
+
+static inline int8_t saturate_int8(int32_t t0) {
+    if (t0 > 127) return 127;
+    if (t0 < -128) return -128;
+    return (int8_t)t0;
 }
 
-static inline int8_t quantize_float(float value, float scale, int32_t zp) {
-    return saturate_int8((int32_t)roundf(value / scale) + zp);
+static inline int8_t quantize_float(float t0, float scale, int32_t zp) {
+    return saturate_int8((int32_t)roundf(t0 / scale) + zp);
 }
 
-static inline float dequantize_int8(int8_t value, float scale, int32_t zp) {
-    return ((float)value - (float)zp) * scale;
+static inline float dequantize_int8(int8_t t0, float scale, int32_t zp) {
+    return ((float)t0 - (float)zp) * scale;
 }
 
-// 元素级加法
-static void op_add(const int8_t* in1, const int8_t* in2, int8_t* out, int size,
+// 元素级加法: pout[i] = pin1[i] + pin2[i]
+static void op_add(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
                    float s1, int z1, float s2, int z2, float so, int zo) {
-    float r1 = s1 / so, r2 = s2 / so;
-    for (int i = 0; i < size; i++) {
-        float v = ((float)in1[i] - z1) * r1 + ((float)in2[i] - z2) * r2;
-        out[i] = saturate_int8((int32_t)roundf(v) + zo);
+    float t0 = s1 / so;
+    float t1 = s2 / so;
+    for (volatile int i = 0; i < len; i++) {
+        float t2 = ((float)*(pin1 + i) - z1) * t0 + ((float)*(pin2 + i) - z2) * t1;
+        *(pout + i) = saturate_int8((int32_t)roundf(t2) + zo);
     }
 }
 
-// 元素级减法
-static void op_sub(const int8_t* in1, const int8_t* in2, int8_t* out, int size,
+// 元素级减法: pout[i] = pin1[i] - pin2[i]
+static void op_sub(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
                    float s1, int z1, float s2, int z2, float so, int zo) {
-    float r1 = s1 / so, r2 = s2 / so;
-    for (int i = 0; i < size; i++) {
-        float v = ((float)in1[i] - z1) * r1 - ((float)in2[i] - z2) * r2;
-        out[i] = saturate_int8((int32_t)roundf(v) + zo);
+    float t0 = s1 / so;
+    float t1 = s2 / so;
+    for (volatile int i = 0; i < len; i++) {
+        float t2 = ((float)*(pin1 + i) - z1) * t0 - ((float)*(pin2 + i) - z2) * t1;
+        *(pout + i) = saturate_int8((int32_t)roundf(t2) + zo);
     }
 }
 
-// 元素级乘法
-static void op_mul(const int8_t* in1, const int8_t* in2, int8_t* out, int size,
+// 元素级乘法: pout[i] = pin1[i] * pin2[i]
+static void op_mul(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
                    float s1, int z1, float s2, int z2, float so, int zo) {
-    float eff = (s1 * s2) / so;
-    for (int i = 0; i < size; i++) {
-        float v = ((float)in1[i] - z1) * ((float)in2[i] - z2) * eff;
-        out[i] = saturate_int8((int32_t)roundf(v) + zo);
+    float t0 = (s1 * s2) / so;
+    for (volatile int i = 0; i < len; i++) {
+        float t1 = ((float)*(pin1 + i) - z1) * ((float)*(pin2 + i) - z2) * t0;
+        *(pout + i) = saturate_int8((int32_t)roundf(t1) + zo);
     }
 }
 
-// 平方差
-static void op_squared_diff(const int8_t* in1, const int8_t* in2, int8_t* out, int size,
+// 平方差: pout[i] = (pin1[i] - pin2[i])^2
+static void op_squared_diff(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
                             float s1, int z1, float s2, int z2, float so, int zo) {
-    float eff = (s1 * s1) / so;
-    for (int i = 0; i < size; i++) {
-        float diff = ((float)in1[i] - z1) - ((float)in2[i] - z2) * (s2 / s1);
-        float v = diff * diff * eff;
-        out[i] = saturate_int8((int32_t)roundf(v) + zo);
+    float t0 = (s1 * s1) / so;
+    float t1 = s2 / s1;
+    for (volatile int i = 0; i < len; i++) {
+        float t2 = ((float)*(pin1 + i) - z1) - ((float)*(pin2 + i) - z2) * t1;
+        float t3 = t2 * t2 * t0;
+        *(pout + i) = saturate_int8((int32_t)roundf(t3) + zo);
     }
 }
 
-// 倒数平方根
-static void op_rsqrt(const int8_t* in, int8_t* out, int size,
+// 倒数平方根: pout[i] = 1/sqrt(pin[i])
+static void op_rsqrt(const int8_t* pin, int8_t* pout, int len,
                      float si, int zi, float so, int zo) {
-    for (int i = 0; i < size; i++) {
-        float val = ((float)in[i] - zi) * si;
-        float rsqrt = 1.0f / sqrtf(fmaxf(val, 1e-12f));
-        out[i] = saturate_int8((int32_t)roundf(rsqrt / so) + zo);
+    for (volatile int i = 0; i < len; i++) {
+        float t0 = ((float)*(pin + i) - zi) * si;
+        float t1 = 1.0f / sqrtf(fmaxf(t0, 1e-12f));
+        *(pout + i) = saturate_int8((int32_t)roundf(t1 / so) + zo);
     }
 }
 
-// 全连接层
-static void op_fc(const int8_t* input, int batch, int in_dim, int out_dim,
-                  const int8_t* weight, const int32_t* bias, int8_t* output,
-                  float si, int zi, const float* w_scales, float so, int zo) {
-    for (int b = 0; b < batch; b++) {
-        for (int o = 0; o < out_dim; o++) {
-            int32_t acc = 0;
-            for (int i = 0; i < in_dim; i++) {
-                acc += ((int32_t)input[b * in_dim + i] - zi) * (int32_t)weight[o * in_dim + i];
+// 全连接层: pout = pin @ pweight^T + pbias
+// 优化: 预先计算每个输出通道的缩放因子数组，避免内层循环浮点除法
+static void op_fc(const int8_t* pin, int nbatch, int chn_in, int chn_out,
+                  const int8_t* pweight, const int32_t* pbias, int8_t* pout,
+                  float si, int zi, const float* pscales, float so, int zo) {
+    // ===== 预先计算有效缩放因子数组 (在所有循环外) =====
+    float* pscales_eff = (float*)malloc(chn_out * sizeof(float));
+    float t0 = si / so;  // 公共因子
+    for (volatile int o = 0; o < chn_out; o++) {
+        *(pscales_eff + o) = t0 * *(pscales + o);  // 预计算: (si * pscales[o]) / so
+    }
+    HW_BARRIER();  // 确保预计算完成
+    
+    // ===== 主计算循环 (无浮点除法) =====
+    for (volatile int b = 0; b < nbatch; b++) {
+        int in_base = b * chn_in;
+        int out_base = b * chn_out;
+        for (volatile int o = 0; o < chn_out; o++) {
+            int32_t t1 = 0;  // 累加器
+            int w_base = o * chn_in;
+            for (volatile int i = 0; i < chn_in; i++) {
+                int32_t t2 = (int32_t)*(pin + in_base + i) - zi;
+                int32_t t3 = (int32_t)*(pweight + w_base + i);
+                t1 += t2 * t3;
             }
-            if (bias) acc += bias[o];
-            float scale = (si * w_scales[o]) / so;
-            output[b * out_dim + o] = saturate_int8((int32_t)roundf(acc * scale) + zo);
+            if (pbias) t1 += *(pbias + o);
+            // 量化输出: 使用预计算的缩放因子 (仅乘法，无除法)
+            *(pout + out_base + o) = saturate_int8((int32_t)roundf(t1 * *(pscales_eff + o)) + zo);
         }
     }
+    free(pscales_eff);
 }
 
-// 批量矩阵乘法
-static void op_batch_matmul(const int8_t* in1, const int8_t* in2, int8_t* out,
-                            int batch, int m, int k, int n,
+// 批量矩阵乘法: pout[b] = pin1[b] @ pin2[b]
+// 优化: 浮点缩放转换为定点乘数+移位，彻底消除内层浮点运算
+static void op_batch_matmul(const int8_t* pin1, const int8_t* pin2, int8_t* pout,
+                            int nbatch, int side_m, int side_k, int side_n,
                             float s1, int z1, float s2, int z2, float so, int zo) {
-    float eff = (s1 * s2) / so;
-    for (int b = 0; b < batch; b++) {
-        for (int i = 0; i < m; i++) {
-            for (int j = 0; j < n; j++) {
-                int32_t acc = 0;
-                for (int l = 0; l < k; l++) {
-                    acc += ((int32_t)in1[b*m*k + i*k + l] - z1) * 
-                           ((int32_t)in2[b*k*n + l*n + j] - z2);
+    // ===== 预计算: 将浮点缩放转换为定点乘数+移位 =====
+    float t0 = (s1 * s2) / so;  // 有效缩放因子
+    int shift = 15;  // 定点小数位数 (Q15格式)
+    int32_t multiplier = (int32_t)roundf(t0 * (1 << shift));  // 定点乘数
+    HW_BARRIER();  // 确保预计算完成
+    
+    // 预计算 stride (整数计算，无浮点)
+    int stride1_b = side_m * side_k;
+    int stride2_b = side_k * side_n;
+    int stride_out = side_m * side_n;
+    
+    // ===== 主计算循环 (纯整数运算) =====
+    for (volatile int b = 0; b < nbatch; b++) {
+        int base1 = b * stride1_b;
+        int base2 = b * stride2_b;
+        int base_out = b * stride_out;
+        for (volatile int i = 0; i < side_m; i++) {
+            for (volatile int j = 0; j < side_n; j++) {
+                int32_t t1 = 0;
+                for (volatile int l = 0; l < side_k; l++) {
+                    int32_t t2 = (int32_t)*(pin1 + base1 + i * side_k + l) - z1;
+                    int32_t t3 = (int32_t)*(pin2 + base2 + l * side_n + j) - z2;
+                    t1 += t2 * t3;
                 }
-                out[b*m*n + i*n + j] = saturate_int8((int32_t)roundf(acc * eff) + zo);
+                // 定点量化: (t1 * multiplier) >> shift + zo
+                int64_t t4 = ((int64_t)t1 * (int64_t)multiplier) >> shift;
+                *(pout + base_out + i * side_n + j) = saturate_int8((int32_t)t4 + zo);
             }
         }
     }
 }
 
-// 均值
-static void op_mean(const int8_t* input, int8_t* output,
-                    int outer, int reduce_size, int inner,
+// 均值: 沿指定维度求平均
+static void op_mean(const int8_t* pin, int8_t* pout,
+                    int outer, int reduce_len, int inner,
                     float si, int zi, float so, int zo) {
-    float scale_ratio = si / so;
-    for (int o = 0; o < outer; o++) {
-        for (int i = 0; i < inner; i++) {
-            int32_t sum = 0;
-            for (int r = 0; r < reduce_size; r++) {
-                sum += input[o * reduce_size * inner + r * inner + i];
+    float t0 = si / so;
+    for (volatile int o = 0; o < outer; o++) {
+        int in_base = o * reduce_len * inner;
+        int out_base = o * inner;
+        for (volatile int i = 0; i < inner; i++) {
+            int32_t t1 = 0;
+            for (volatile int r = 0; r < reduce_len; r++) {
+                t1 += *(pin + in_base + r * inner + i);
             }
-            int32_t mean = sum / reduce_size;
-            output[o * inner + i] = saturate_int8((int32_t)roundf((mean - zi) * scale_ratio) + zo);
+            // 使用位移替代常见2^n除法
+            int32_t t2;
+            switch (reduce_len) {
+                case 2:   t2 = t1 >> 1;  break;
+                case 4:   t2 = t1 >> 2;  break;
+                case 8:   t2 = t1 >> 3;  break;
+                case 16:  t2 = t1 >> 4;  break;
+                case 32:  t2 = t1 >> 5;  break;
+                case 64:  t2 = t1 >> 6;  break;
+                case 128: t2 = t1 >> 7;  break;
+                case 256: t2 = t1 >> 8;  break;
+                default:  t2 = t1 / reduce_len;  break;
+            }
+            *(pout + out_base + i) = saturate_int8((int32_t)roundf((t2 - zi) * t0) + zo);
         }
     }
 }
 
-// Softmax (沿最后一个维度)
-static void op_softmax(const int8_t* input, int8_t* output, int batch, int classes,
+// Softmax: 沿最后一个维度
+static void op_softmax(const int8_t* pin, int8_t* pout, int nbatch, int nclass,
                        float si, int zi, float so, int zo) {
-    float* vals = (float*)malloc(classes * sizeof(float));
-    for (int b = 0; b < batch; b++) {
-        float max_val = -1e9f;
-        for (int c = 0; c < classes; c++) {
-            vals[c] = ((float)input[b*classes + c] - zi) * si;
-            if (vals[c] > max_val) max_val = vals[c];
+    float* pvals = (float*)malloc(nclass << 2);  // nclass * 4 bytes
+    for (volatile int b = 0; b < nbatch; b++) {
+        int base = b * nclass;
+        float t0 = -1e9f;
+        for (volatile int c = 0; c < nclass; c++) {
+            *(pvals + c) = ((float)*(pin + base + c) - zi) * si;
+            if (*(pvals + c) > t0) t0 = *(pvals + c);
         }
-        float sum = 0.0f;
-        for (int c = 0; c < classes; c++) {
-            vals[c] = expf(vals[c] - max_val);
-            sum += vals[c];
+        float t1 = 0.0f;
+        for (volatile int c = 0; c < nclass; c++) {
+            *(pvals + c) = expf(*(pvals + c) - t0);
+            t1 += *(pvals + c);
         }
-        for (int c = 0; c < classes; c++) {
-            float softmax_val = vals[c] / sum;
-            output[b*classes + c] = saturate_int8((int32_t)roundf(softmax_val / so) + zo);
+        for (volatile int c = 0; c < nclass; c++) {
+            float t2 = *(pvals + c) / t1;
+            *(pout + base + c) = saturate_int8((int32_t)roundf(t2 / so) + zo);
         }
     }
-    free(vals);
+    free(pvals);
 }
 
-// Reshape/复制
-static void op_copy(const int8_t* in, int8_t* out, int size) {
-    if (in != out) memcpy(out, in, size);
+// 数据复制 (Reshape)
+static void op_copy(const int8_t* pin, int8_t* pout, int len) {
+    if (pin != pout) memcpy(pout, pin, len);
 }
 
-// Transpose 3D
-static void op_transpose_3d(const int8_t* in, int8_t* out,
-                            int d0, int d1, int d2, int p0, int p1, int p2) {
-    int dims[3] = {d0, d1, d2};
-    int perm[3] = {p0, p1, p2};
-    int new_d[3] = {dims[perm[0]], dims[perm[1]], dims[perm[2]]};
+// Transpose 3D: 使用手动偏移计算
+static void op_transpose_3d(const int8_t* pin, int8_t* pout,
+                            int side0, int side1, int side2, 
+                            int perm0, int perm1, int perm2) {
+    int sides[3] = {side0, side1, side2};
+    int perm[3] = {perm0, perm1, perm2};
+    int new_sides[3] = {sides[perm[0]], sides[perm[1]], sides[perm[2]]};
     
-    for (int i0 = 0; i0 < d0; i0++) {
-        for (int i1 = 0; i1 < d1; i1++) {
-            for (int i2 = 0; i2 < d2; i2++) {
-                int in_idx = i0 * d1 * d2 + i1 * d2 + i2;
-                int old[3] = {i0, i1, i2};
-                int new_idx = old[perm[0]] * new_d[1] * new_d[2] + 
-                              old[perm[1]] * new_d[2] + old[perm[2]];
-                out[new_idx] = in[in_idx];
+    int stride_in1 = side2;
+    int stride_in0 = side1 * side2;
+    int stride_out1 = new_sides[2];
+    int stride_out0 = new_sides[1] * new_sides[2];
+    
+    for (volatile int i0 = 0; i0 < side0; i0++) {
+        for (volatile int i1 = 0; i1 < side1; i1++) {
+            for (volatile int i2 = 0; i2 < side2; i2++) {
+                int in_off = i0 * stride_in0 + i1 * stride_in1 + i2;
+                int old_idx[3] = {i0, i1, i2};
+                int new_idx[3];
+                new_idx[0] = old_idx[perm[0]];
+                new_idx[1] = old_idx[perm[1]];
+                new_idx[2] = old_idx[perm[2]];
+                int out_off = new_idx[0] * stride_out0 + new_idx[1] * stride_out1 + new_idx[2];
+                *(pout + out_off) = *(pin + in_off);
             }
         }
     }
 }
 
-// Transpose 4D
-static void op_transpose_4d(const int8_t* in, int8_t* out,
-                            int d0, int d1, int d2, int d3, 
-                            int p0, int p1, int p2, int p3) {
-    int dims[4] = {d0, d1, d2, d3};
-    int perm[4] = {p0, p1, p2, p3};
-    int new_d[4] = {dims[perm[0]], dims[perm[1]], dims[perm[2]], dims[perm[3]]};
+// Transpose 4D: 使用手动偏移计算
+static void op_transpose_4d(const int8_t* pin, int8_t* pout,
+                            int side0, int side1, int side2, int side3, 
+                            int perm0, int perm1, int perm2, int perm3) {
+    int sides[4] = {side0, side1, side2, side3};
+    int perm[4] = {perm0, perm1, perm2, perm3};
+    int new_sides[4] = {sides[perm[0]], sides[perm[1]], sides[perm[2]], sides[perm[3]]};
     
-    for (int i0 = 0; i0 < d0; i0++) {
-        for (int i1 = 0; i1 < d1; i1++) {
-            for (int i2 = 0; i2 < d2; i2++) {
-                for (int i3 = 0; i3 < d3; i3++) {
-                    int in_idx = i0*d1*d2*d3 + i1*d2*d3 + i2*d3 + i3;
-                    int old[4] = {i0, i1, i2, i3};
-                    int new_idx = old[perm[0]]*new_d[1]*new_d[2]*new_d[3] + 
-                                  old[perm[1]]*new_d[2]*new_d[3] + 
-                                  old[perm[2]]*new_d[3] + old[perm[3]];
-                    out[new_idx] = in[in_idx];
+    int stride_in2 = side3;
+    int stride_in1 = side2 * side3;
+    int stride_in0 = side1 * side2 * side3;
+    int stride_out2 = new_sides[3];
+    int stride_out1 = new_sides[2] * new_sides[3];
+    int stride_out0 = new_sides[1] * new_sides[2] * new_sides[3];
+    
+    for (volatile int i0 = 0; i0 < side0; i0++) {
+        for (volatile int i1 = 0; i1 < side1; i1++) {
+            for (volatile int i2 = 0; i2 < side2; i2++) {
+                for (volatile int i3 = 0; i3 < side3; i3++) {
+                    int in_off = i0 * stride_in0 + i1 * stride_in1 + i2 * stride_in2 + i3;
+                    int old_idx[4] = {i0, i1, i2, i3};
+                    int new_idx[4];
+                    new_idx[0] = old_idx[perm[0]];
+                    new_idx[1] = old_idx[perm[1]];
+                    new_idx[2] = old_idx[perm[2]];
+                    new_idx[3] = old_idx[perm[3]];
+                    int out_off = new_idx[0] * stride_out0 + new_idx[1] * stride_out1 + 
+                                  new_idx[2] * stride_out2 + new_idx[3];
+                    *(pout + out_off) = *(pin + in_off);
                 }
             }
         }
@@ -1295,19 +1596,23 @@ static void op_transpose_4d(const int8_t* in, int8_t* out,
 '''
     
     def _generate_inference(self):
-        """生成推理函数"""
+        """生成推理函数 - Bare-metal Style"""
         input_tid = self.input_details[0]['index']
         output_tid = self.output_details[0]['index']
         input_scale, input_zp = self._get_scale_zp(input_tid)
         output_scale, output_zp = self._get_scale_zp(output_tid)
         
-        code = '''// ============== 推理函数 ==============
+        code = '''// ============== 推理函数 - Bare-metal Style ==============
 
-int ecgformer_inference(const float* input_float, float* output_probs) {
-    // 量化输入
-    for (int i = 0; i < INPUT_SIZE; i++) {
-        tensors[''' + str(input_tid) + '''][i] = quantize_float(input_float[i], INPUT_SCALE, INPUT_ZERO_POINT);
+int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
+    int8_t* pin = *(ptensors + ''' + str(input_tid) + ''');
+    
+    // 量化输入: 使用指针算术和volatile循环
+    for (volatile int i = 0; i < INPUT_SIZE; i++) {
+        float t0 = *(pinput_float + i);
+        *(pin + i) = quantize_float(t0, INPUT_SCALE, INPUT_ZERO_POINT);
     }
+    HW_BARRIER();  // 确保输入写入完成
     
 '''
         
@@ -1318,28 +1623,31 @@ int ecgformer_inference(const float* input_float, float* output_probs) {
         # 输出处理
         code += f'''
     // 反量化输出并找预测类别
-    int pred = 0;
-    float max_prob = -1e9f;
-    for (int i = 0; i < OUTPUT_CLASSES; i++) {{
-        output_probs[i] = dequantize_int8(tensors[{output_tid}][i], OUTPUT_SCALE, OUTPUT_ZERO_POINT);
-        if (output_probs[i] > max_prob) {{
-            max_prob = output_probs[i];
-            pred = i;
+    int8_t* pout = *(ptensors + {output_tid});
+    int t0 = 0;      // pred
+    float t1 = -1e9f;  // max_prob
+    for (volatile int i = 0; i < OUTPUT_CLASSES; i++) {{
+        float t2 = dequantize_int8(*(pout + i), OUTPUT_SCALE, OUTPUT_ZERO_POINT);
+        *(poutput_probs + i) = t2;
+        if (t2 > t1) {{
+            t1 = t2;
+            t0 = i;
         }}
     }}
-    return pred;
+    return t0;
 }}
 
-// 获取INT8输出（用于验证）
-void ecgformer_get_int8_output(int8_t* output) {{
-    memcpy(output, tensors[{output_tid}], OUTPUT_CLASSES);
+// 获取INT8输出 (用于硬件验证)
+void ecgformer_get_int8_output(int8_t* poutput) {{
+    int8_t* psrc = *(ptensors + {output_tid});
+    memcpy(poutput, psrc, OUTPUT_CLASSES);
 }}
 
 '''
         return code
     
     def _generate_op_code(self, op):
-        """为单个操作生成代码"""
+        """为单个操作生成代码 - Bare-metal Style (单文件版本)"""
         op_id = op['id']
         op_type = op['type']
         inputs = op['inputs']
@@ -1355,11 +1663,11 @@ void ecgformer_get_int8_output(int8_t* output) {{
         
         if op_type == 'RESHAPE':
             in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
-            code += f'    op_copy(tensors[{inputs[0]}], tensors[{out_tid}], {in_size});\n'
+            code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {in_size});\n'
         
         elif op_type == 'EXPAND_DIMS':
             in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
-            code += f'    op_copy(tensors[{inputs[0]}], tensors[{out_tid}], {in_size});\n'
+            code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {in_size});\n'
         
         elif op_type == 'TRANSPOSE':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -1367,49 +1675,49 @@ void ecgformer_get_int8_output(int8_t* output) {{
             perm = self.weights_data.get(perm_tid, np.arange(len(in_shape))).flatten().tolist()
             
             if len(in_shape) == 3:
-                code += f'    op_transpose_3d(tensors[{inputs[0]}], tensors[{out_tid}], '
+                code += f'    op_transpose_3d(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), '
                 code += f'{in_shape[0]}, {in_shape[1]}, {in_shape[2]}, '
                 code += f'{int(perm[0])}, {int(perm[1])}, {int(perm[2])});\n'
             elif len(in_shape) == 4:
-                code += f'    op_transpose_4d(tensors[{inputs[0]}], tensors[{out_tid}], '
+                code += f'    op_transpose_4d(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), '
                 code += f'{in_shape[0]}, {in_shape[1]}, {in_shape[2]}, {in_shape[3]}, '
                 code += f'{int(perm[0])}, {int(perm[1])}, {int(perm[2])}, {int(perm[3])});\n'
             else:
-                code += f'    op_copy(tensors[{inputs[0]}], tensors[{out_tid}], {out_size});\n'
+                code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {out_size});\n'
         
         elif op_type == 'ADD':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
-            code += f'    op_add(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}], {out_size},\n'
+            code += f'    op_add(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
             code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'SUB':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
             if inputs[0] == inputs[1]:
-                code += f'    memset(tensors[{out_tid}], {out_zp}, {out_size});\n'
+                code += f'    memset(*(ptensors + {out_tid}), {out_zp}, {out_size});\n'
             else:
-                code += f'    op_sub(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}], {out_size},\n'
+                code += f'    op_sub(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
                 code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'MUL':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
-            code += f'    op_mul(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}], {out_size},\n'
+            code += f'    op_mul(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
             code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'SQUARED_DIFFERENCE':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
             if inputs[0] == inputs[1]:
-                code += f'    memset(tensors[{out_tid}], {out_zp}, {out_size});\n'
+                code += f'    memset(*(ptensors + {out_tid}), {out_zp}, {out_size});\n'
             else:
-                code += f'    op_squared_diff(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}], {out_size},\n'
+                code += f'    op_squared_diff(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
                 code += f'                    {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'RSQRT':
             si, zi = self._get_scale_zp(inputs[0])
-            code += f'    op_rsqrt(tensors[{inputs[0]}], tensors[{out_tid}], {out_size},\n'
+            code += f'    op_rsqrt(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {out_size},\n'
             code += f'             {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'FULLY_CONNECTED':
@@ -1418,31 +1726,32 @@ void ecgformer_get_int8_output(int8_t* output) {{
             weight_shape = self.tensors_info.get(weight_tid, {}).get('shape', ())
             
             si, zi = self._get_scale_zp(inputs[0])
-            in_dim = in_shape[-1] if len(in_shape) > 0 else 1
-            batch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
-            out_dim = weight_shape[0] if len(weight_shape) > 0 else 1
+            chn_in = in_shape[-1] if len(in_shape) > 0 else 1
+            nbatch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
+            chn_out = weight_shape[0] if len(weight_shape) > 0 else 1
             
             has_bias = len(inputs) > 2
-            bias_str = f'(const int32_t*)tensors[{inputs[2]}]' if has_bias else 'NULL'
+            pbias_str = f'(const int32_t*)*(ptensors + {inputs[2]})' if has_bias else 'NULL'
             
             # 检查是否有per-channel scales
             weight_info = self.tensors_info.get(weight_tid, {})
             weight_scales = weight_info.get('scales', np.array([]))
             
             if len(weight_scales) > 1:
-                scales_str = f'scales_t{weight_tid}'
+                pscales_str = f'scales_t{weight_tid}'
             else:
-                # 使用单一scale，创建临时数组
+                # 使用malloc分配临时scale数组 (无null检查)
                 single_scale = weight_scales[0] if len(weight_scales) > 0 else 1.0
-                code += f'    {{ float ws[{out_dim}]; for(int i=0;i<{out_dim};i++) ws[i]={single_scale:.10e}f;\n'
-                scales_str = 'ws'
+                code += f'    {{ float* pws = (float*)malloc({chn_out} << 2);\n'
+                code += f'      for(volatile int t0=0; t0<{chn_out}; t0++) *(pws+t0)={single_scale:.10e}f;\n'
+                pscales_str = 'pws'
             
-            code += f'    op_fc(tensors[{inputs[0]}], {batch}, {in_dim}, {out_dim},\n'
-            code += f'          (const int8_t*)tensors[{weight_tid}], {bias_str}, tensors[{out_tid}],\n'
-            code += f'          {si:.10e}f, {zi}, {scales_str}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'    op_fc(*(ptensors + {inputs[0]}), {nbatch}, {chn_in}, {chn_out},\n'
+            code += f'          (const int8_t*)*(ptensors + {weight_tid}), {pbias_str}, *(ptensors + {out_tid}),\n'
+            code += f'          {si:.10e}f, {zi}, {pscales_str}, {out_scale:.10e}f, {out_zp});\n'
             
             if len(weight_scales) <= 1:
-                code += '    }\n'
+                code += '      free(pws); }\n'
         
         elif op_type == 'CONV_2D':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -1450,29 +1759,30 @@ void ecgformer_get_int8_output(int8_t* output) {{
             weight_shape = self.tensors_info.get(weight_tid, {}).get('shape', ())
             
             si, zi = self._get_scale_zp(inputs[0])
-            c_in = in_shape[-1] if len(in_shape) > 0 else 1
+            chn_in = in_shape[-1] if len(in_shape) > 0 else 1
             spatial = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
-            c_out = weight_shape[0] if len(weight_shape) > 0 else 1
+            chn_out = weight_shape[0] if len(weight_shape) > 0 else 1
             
             has_bias = len(inputs) > 2
-            bias_str = f'(const int32_t*)tensors[{inputs[2]}]' if has_bias else 'NULL'
+            pbias_str = f'(const int32_t*)*(ptensors + {inputs[2]})' if has_bias else 'NULL'
             
             weight_info = self.tensors_info.get(weight_tid, {})
             weight_scales = weight_info.get('scales', np.array([]))
             
             if len(weight_scales) > 1:
-                scales_str = f'scales_t{weight_tid}'
+                pscales_str = f'scales_t{weight_tid}'
             else:
                 single_scale = weight_scales[0] if len(weight_scales) > 0 else 1.0
-                code += f'    {{ float ws[{c_out}]; for(int i=0;i<{c_out};i++) ws[i]={single_scale:.10e}f;\n'
-                scales_str = 'ws'
+                code += f'    {{ float* pws = (float*)malloc({chn_out} << 2);\n'
+                code += f'      for(volatile int t0=0; t0<{chn_out}; t0++) *(pws+t0)={single_scale:.10e}f;\n'
+                pscales_str = 'pws'
             
-            code += f'    op_fc(tensors[{inputs[0]}], {spatial}, {c_in}, {c_out},\n'
-            code += f'          (const int8_t*)tensors[{weight_tid}], {bias_str}, tensors[{out_tid}],\n'
-            code += f'          {si:.10e}f, {zi}, {scales_str}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'    op_fc(*(ptensors + {inputs[0]}), {spatial}, {chn_in}, {chn_out},\n'
+            code += f'          (const int8_t*)*(ptensors + {weight_tid}), {pbias_str}, *(ptensors + {out_tid}),\n'
+            code += f'          {si:.10e}f, {zi}, {pscales_str}, {out_scale:.10e}f, {out_zp});\n'
             
             if len(weight_scales) <= 1:
-                code += '    }\n'
+                code += '      free(pws); }\n'
         
         elif op_type == 'BATCH_MATMUL':
             in1_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -1480,13 +1790,13 @@ void ecgformer_get_int8_output(int8_t* output) {{
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
             
-            batch = in1_shape[0] if len(in1_shape) > 2 else 1
-            m = in1_shape[1] if len(in1_shape) > 1 else 1
-            k = in1_shape[2] if len(in1_shape) > 2 else in1_shape[1] if len(in1_shape) > 1 else 1
-            n = in2_shape[2] if len(in2_shape) > 2 else in2_shape[1] if len(in2_shape) > 1 else 1
+            nbatch = in1_shape[0] if len(in1_shape) > 2 else 1
+            side_m = in1_shape[1] if len(in1_shape) > 1 else 1
+            side_k = in1_shape[2] if len(in1_shape) > 2 else in1_shape[1] if len(in1_shape) > 1 else 1
+            side_n = in2_shape[2] if len(in2_shape) > 2 else in2_shape[1] if len(in2_shape) > 1 else 1
             
-            code += f'    op_batch_matmul(tensors[{inputs[0]}], tensors[{inputs[1]}], tensors[{out_tid}],\n'
-            code += f'                    {batch}, {m}, {k}, {n},\n'
+            code += f'    op_batch_matmul(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}),\n'
+            code += f'                    {nbatch}, {side_m}, {side_k}, {side_n},\n'
             code += f'                    {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'MEAN':
@@ -1495,31 +1805,31 @@ void ecgformer_get_int8_output(int8_t* output) {{
             
             # 假设沿最后一个轴
             outer = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
-            reduce_size = in_shape[-1] if len(in_shape) > 0 else 1
+            reduce_len = in_shape[-1] if len(in_shape) > 0 else 1
             inner = 1
             
-            code += f'    op_mean(tensors[{inputs[0]}], tensors[{out_tid}],\n'
-            code += f'            {outer}, {reduce_size}, {inner},\n'
+            code += f'    op_mean(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}),\n'
+            code += f'            {outer}, {reduce_len}, {inner},\n'
             code += f'            {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
         
         elif op_type == 'SOFTMAX':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
             si, zi = self._get_scale_zp(inputs[0])
             # softmax沿最后一个维度，所以batch是前面所有维度的乘积
-            batch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
-            classes = in_shape[-1] if len(in_shape) > 0 else 1
+            nbatch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
+            nclass = in_shape[-1] if len(in_shape) > 0 else 1
             
-            code += f'    op_softmax(tensors[{inputs[0]}], tensors[{out_tid}], {batch}, {classes},\n'
+            code += f'    op_softmax(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {nbatch}, {nclass},\n'
             code += f'               {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
         
         else:
-            code += f'    // TODO: 实现 {op_type}\n'
+            code += f'    // TODO: Implement {op_type}\n'
         
         code += '\n'
         return code
     
     def _generate_main(self):
-        """生成main函数和共享库接口"""
+        """生成main函数和共享库接口 - Bare-metal Style"""
         return '''// ============== 共享库接口 ==============
 
 #ifdef BUILD_SHARED_LIB
@@ -1533,40 +1843,42 @@ EXPORT void c_init(void) {
     init_tensors();
 }
 
-EXPORT int c_inference(const float* input, float* output) {
-    return ecgformer_inference(input, output);
+EXPORT int c_inference(const float* pinput, float* poutput) {
+    return ecgformer_inference(pinput, poutput);
 }
 
-EXPORT void c_get_int8_output(int8_t* output) {
-    ecgformer_get_int8_output(output);
+EXPORT void c_get_int8_output(int8_t* poutput) {
+    ecgformer_get_int8_output(poutput);
 }
 #endif
 
-// ============== 主函数 ==============
+// ============== 主函数 - Bare-metal Style ==============
 
 #ifndef BUILD_SHARED_LIB
 int main(int argc, char* argv[]) {
     init_tensors();
     
-    printf("ECGformer INT8 完整C实现\\n");
-    printf("==============================\\n");
+    printf("ECGformer INT8 Bare-metal C Implementation\\n");
+    printf("==========================================\\n");
     
-    // 测试用随机输入
-    float test_input[INPUT_SIZE];
-    for (int i = 0; i < INPUT_SIZE; i++) {
-        test_input[i] = ((float)rand() / RAND_MAX - 0.5f);
+    // 测试用随机输入 (使用malloc, 无null检查)
+    float* ptest_input = (float*)malloc(INPUT_SIZE << 2);  // INPUT_SIZE * 4
+    for (volatile int i = 0; i < INPUT_SIZE; i++) {
+        *(ptest_input + i) = ((float)rand() / RAND_MAX - 0.5f);
     }
     
     // 推理
-    float output_probs[OUTPUT_CLASSES];
-    int pred = ecgformer_inference(test_input, output_probs);
+    float* poutput_probs = (float*)malloc(OUTPUT_CLASSES << 2);  // OUTPUT_CLASSES * 4
+    int t0 = ecgformer_inference(ptest_input, poutput_probs);
     
-    printf("\\n预测结果:\\n");
-    for (int i = 0; i < OUTPUT_CLASSES; i++) {
-        printf("  类别 %d (%s): %.4f%s\\n", i, CLASS_NAMES[i], output_probs[i],
-               i == pred ? " <-- 预测" : "");
+    printf("\\nPrediction Results:\\n");
+    for (volatile int i = 0; i < OUTPUT_CLASSES; i++) {
+        printf("  Class %d (%s): %.4f%s\\n", i, CLASS_NAMES[i], *(poutput_probs + i),
+               i == t0 ? " <-- Predicted" : "");
     }
     
+    free(ptest_input);
+    free(poutput_probs);
     return 0;
 }
 #endif
