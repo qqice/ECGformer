@@ -47,6 +47,10 @@ class ECGformerCGenerator:
         self.activation_tensors = set()
         self._classify_tensors()
         
+        # 张量生命周期分析 (用于内存复用)
+        self.tensor_lifetime = {}  # {tid: (first_use_op, last_use_op)}
+        self._analyze_tensor_lifetime()
+        
     def _parse_ops(self):
         """解析TFLite模型操作"""
         old_stdout = sys.stdout
@@ -143,6 +147,111 @@ class ECGformerCGenerator:
         
         # 预扫描收集 per-channel Q16 scales (适配INT26)
         self._precompute_q16_scales()
+
+    def _analyze_tensor_lifetime(self):
+        """分析每个激活张量的生命周期
+        
+        计算每个张量的:
+        - first_use: 首次使用的op编号（作为输出创建）
+        - last_use: 最后使用的op编号（作为输入被消费）
+        """
+        output_tid = self.output_details[0]['index']
+        input_tid = self.input_details[0]['index']
+        
+        # first_use: 张量作为输出被创建的位置
+        # 对于输入张量，first_use = -1 (在推理开始前就存在)
+        first_use = {}
+        last_use = {}
+        
+        # 初始化输入张量
+        first_use[input_tid] = -1
+        last_use[input_tid] = -1  # 将被后续操作更新
+        
+        for op in self.ops:
+            op_idx = op['id']
+            
+            # 输出张量在此操作被创建
+            for tid in op['outputs']:
+                if tid in self.activation_tensors:
+                    first_use[tid] = op_idx
+            
+            # 输入张量在此操作被使用
+            for tid in op['inputs']:
+                if tid in self.activation_tensors:
+                    last_use[tid] = op_idx
+        
+        # 输出张量需要一直保留到推理结束
+        last_use[output_tid] = len(self.ops)
+        
+        # 构建生命周期字典
+        for tid in self.activation_tensors:
+            f = first_use.get(tid, 0)
+            l = last_use.get(tid, len(self.ops))
+            self.tensor_lifetime[tid] = (f, l)
+        
+        # 打印生命周期统计
+        print(f"  张量生命周期分析完成: {len(self.tensor_lifetime)} 个激活张量")
+
+    def _compute_memory_reuse_allocation(self):
+        """使用贪心算法计算内存复用分配
+        
+        返回:
+        - slot_assignments: {tid: slot_index}  每个张量分配到哪个槽位
+        - slot_sizes: [size, ...]  每个槽位的大小（取其中最大张量的大小）
+        - peak_memory: 峰值内存使用量
+        
+        关键约束: 同一个操作的输入和输出不能共享槽位（避免读写冲突）
+        """
+        # 按照首次使用时间排序
+        sorted_tensors = sorted(
+            self.activation_tensors,
+            key=lambda tid: (self.tensor_lifetime.get(tid, (0, 0))[0], 
+                           -self.tensors_info.get(tid, {}).get('size', 0))
+        )
+        
+        # 槽位列表: {'size': max_size, 'end_time': when_available}
+        slots = []
+        slot_assignments = {}
+        
+        for tid in sorted_tensors:
+            if tid not in self.tensors_info:
+                continue
+                
+            size = self.tensors_info[tid]['size']
+            start_time, end_time = self.tensor_lifetime.get(tid, (0, len(self.ops)))
+            
+            # 查找可复用的槽位
+            # 关键: 使用严格小于 (<) 而不是小于等于 (<=)
+            # 这确保了同一操作的输入和输出不会共享槽位
+            # 因为输入张量的 end_time 等于输出张量的 start_time
+            best_slot = None
+            best_slot_idx = -1
+            best_waste = float('inf')
+            
+            for i, slot in enumerate(slots):
+                # 槽位可用条件: 前一个张量在此操作之前已经结束（严格小于）
+                if slot['end_time'] < start_time:
+                    # 计算浪费的内存
+                    waste = abs(slot['size'] - size)
+                    if waste < best_waste:
+                        best_waste = waste
+                        best_slot = slot
+                        best_slot_idx = i
+            
+            if best_slot is not None:
+                # 复用现有槽位
+                best_slot['size'] = max(best_slot['size'], size)
+                best_slot['end_time'] = end_time
+                slot_assignments[tid] = best_slot_idx
+            else:
+                # 创建新槽位
+                slot_assignments[tid] = len(slots)
+                slots.append({'size': size, 'end_time': end_time})
+        
+        slot_sizes = [s['size'] for s in slots]
+        peak_memory = sum(slot_sizes)
+        
+        return slot_assignments, slot_sizes, peak_memory
     
     def _precompute_q16_scales(self):
         """预扫描所有操作，收集 per-channel Q16 scales (适配26位中间结果)"""
@@ -211,8 +320,14 @@ class ECGformerCGenerator:
         print(f"  常量张量: {len(self.constant_tensors)}")
         print(f"  激活张量: {len(self.activation_tensors)}")
     
-    def generate_modular(self, output_dir: str):
+    def generate_modular(self, output_dir: str, memory_mode: str = 'static'):
         """生成模块化的C实现（多文件模式）
+        
+        Args:
+            output_dir: 输出目录
+            memory_mode: 内存管理模式
+                - 'static': 静态内存池，一次性分配所有激活张量（默认）
+                - 'reuse': 内存复用，通过生命周期分析减少峰值内存
         
         生成的文件:
         - ecgformer_config.h    : 模型配置和类型定义
@@ -222,7 +337,21 @@ class ECGformerCGenerator:
         - ecgformer_ops.h       : 操作函数实现
         - ecgformer_model.c     : 主程序（推理函数和main）
         """
+        self.memory_mode = memory_mode
         os.makedirs(output_dir, exist_ok=True)
+        
+        # 如果使用内存复用模式，计算槽位分配
+        if memory_mode == 'reuse':
+            self.slot_assignments, self.slot_sizes, self.peak_memory = \
+                self._compute_memory_reuse_allocation()
+            print(f"  内存复用分析完成:")
+            print(f"    - 槽位数: {len(self.slot_sizes)}")
+            print(f"    - 峰值内存: {self.peak_memory} bytes ({self.peak_memory/1024:.1f} KB)")
+            original_size = sum(self.tensors_info[tid]['size'] 
+                               for tid in self.activation_tensors 
+                               if tid in self.tensors_info)
+            print(f"    - 原始大小: {original_size} bytes ({original_size/1024:.1f} KB)")
+            print(f"    - 节省比例: {100*(1-self.peak_memory/original_size):.1f}%")
         
         # 1. 生成配置头文件
         self._generate_config_header(output_dir)
@@ -246,6 +375,7 @@ class ECGformerCGenerator:
         print(f"  操作数: {len(self.ops)}")
         print(f"  常量张量: {len(self.constant_tensors)}")
         print(f"  激活张量: {len(self.activation_tensors)}")
+        print(f"  内存模式: {memory_mode}")
         print(f"\n生成的文件:")
         print(f"  - ecgformer_config.h  : 模型配置")
         print(f"  - ecgformer_weights.h : 权重数据")
@@ -263,10 +393,16 @@ class ECGformerCGenerator:
         input_scale, input_zp = self._get_scale_zp(self.input_details[0]['index'])
         output_scale, output_zp = self._get_scale_zp(self.output_details[0]['index'])
         
-        # 统计张量信息
-        total_activation_size = sum(self.tensors_info[tid]['size'] 
-                                   for tid in self.activation_tensors 
-                                   if tid in self.tensors_info)
+        # 根据内存模式选择池大小
+        memory_mode = getattr(self, 'memory_mode', 'static')
+        if memory_mode == 'reuse':
+            pool_size = self.peak_memory
+            num_slots = len(self.slot_sizes)
+        else:
+            pool_size = sum(self.tensors_info[tid]['size'] 
+                           for tid in self.activation_tensors 
+                           if tid in self.tensors_info)
+            num_slots = 0
         
         code = f'''/**
  * ECGformer INT8 模型配置
@@ -283,8 +419,39 @@ class ECGformerCGenerator:
 #define INPUT_SIZE {int(np.prod(input_shape))}
 #define OUTPUT_CLASSES {output_shape[-1]}
 #define NUM_TENSORS {len(self.tensors_info)}
-#define ACTIVATION_POOL_SIZE {total_activation_size}
 
+// 内存管理模式: {"reuse (槽位复用)" if memory_mode == "reuse" else "static (静态分配)"}
+#define MEMORY_MODE_REUSE {1 if memory_mode == "reuse" else 0}
+'''
+        
+        if memory_mode == 'reuse':
+            code += f'''
+// 槽位复用模式: 每个槽位可被多个张量复用
+#define NUM_MEMORY_SLOTS {num_slots}
+#define ACTIVATION_POOL_SIZE {pool_size}
+
+// 槽位大小数组
+static const int g_slot_sizes[{num_slots}] = {{
+    {', '.join(str(s) for s in self.slot_sizes)}
+}};
+
+// 槽位偏移数组 (预计算)
+'''
+            # 计算槽位偏移
+            slot_offsets = []
+            offset = 0
+            for s in self.slot_sizes:
+                slot_offsets.append(offset)
+                offset += s
+            code += f'''static const int g_slot_offsets[{num_slots}] = {{
+    {', '.join(str(o) for o in slot_offsets)}
+}};
+'''
+        else:
+            code += f'''#define ACTIVATION_POOL_SIZE {pool_size}
+'''
+        
+        code += f'''
 // 输入量化参数
 #define INPUT_SCALE {input_scale:.10e}f
 #define INPUT_ZERO_POINT {input_zp}
@@ -845,18 +1012,35 @@ static void op_transpose_4d(const int8_t* pin, int8_t* pout,
         """生成主程序源文件 - Bare-metal Hardware Verification Style"""
         input_tid = self.input_details[0]['index']
         output_tid = self.output_details[0]['index']
+        memory_mode = getattr(self, 'memory_mode', 'static')
         
         # 计算每个激活张量的偏移
-        offsets = {}
-        offset = 0
-        for tid in sorted(self.activation_tensors):
-            if tid in self.tensors_info:
-                offsets[tid] = offset
-                offset += self.tensors_info[tid]['size']
+        if memory_mode == 'reuse':
+            # 槽位复用模式: 使用槽位偏移
+            slot_offsets = []
+            offset = 0
+            for s in self.slot_sizes:
+                slot_offsets.append(offset)
+                offset += s
+            offsets = {}
+            for tid in self.activation_tensors:
+                if tid in self.slot_assignments:
+                    slot_idx = self.slot_assignments[tid]
+                    offsets[tid] = slot_offsets[slot_idx]
+        else:
+            # 静态模式: 顺序分配
+            offsets = {}
+            offset = 0
+            for tid in sorted(self.activation_tensors):
+                if tid in self.tensors_info:
+                    offsets[tid] = offset
+                    offset += self.tensors_info[tid]['size']
         
-        code = '''/**
+        code = f'''/**
  * ECGformer INT8 主程序 - Bare-metal Hardware Verification Style
  * 自动生成 - 请勿手动修改
+ * 
+ * 内存模式: {"reuse (槽位复用)" if memory_mode == "reuse" else "static (静态分配)"}
  * 
  * 编译: gcc -O3 -o ecgformer ecgformer_model.c -lm
  *       riscv64-unknown-elf-gcc -O3 -o ecgformer ecgformer_model.c -lm
@@ -881,16 +1065,16 @@ static void op_transpose_4d(const int8_t* pin, int8_t* pout,
 #include "ecgformer_quant.h"
 #include "ecgformer_ops.h"
 
-// ============== 张量存储 - Bare-metal Style ==============
+// ============== 张量存储 - {"槽位复用模式" if memory_mode == "reuse" else "静态分配模式"} ==============
 
-// 激活张量内存池 (扁平分配)
+// 激活张量内存池
 static int8_t g_activation_pool[ACTIVATION_POOL_SIZE];
 
 // 张量指针数组 (扁平int8_t*)
 static int8_t* ptensors[NUM_TENSORS];
 
 // 初始化张量指针 (无null检查, 直接赋值)
-static void init_tensors(void) {
+static void init_tensors(void) {{
 '''
         
         # 常量张量指向静态数组 (使用指针算术)
@@ -904,24 +1088,41 @@ static void init_tensors(void) {
             elif 'int32' in dtype:
                 code += f'    *(ptensors + {tid}) = (int8_t*)bias_t{tid};\n'
         
-        # 激活张量指向存储池 (使用指针算术)
-        for tid in sorted(self.activation_tensors):
-            if tid in offsets:
-                code += f'    *(ptensors + {tid}) = g_activation_pool + {offsets[tid]};\n'
-        
-        code += '''    HW_BARRIER();  // 内存屏障确保初始化完成
+        if memory_mode == 'reuse':
+            # 槽位复用模式: 在推理开始时动态设置指针
+            # 输入张量需要在init_tensors中设置（因为它在推理前就需要）
+            input_slot_idx = self.slot_assignments.get(input_tid, 0)
+            code += f'''    // 槽位复用模式: 输入张量预先设置
+    *(ptensors + {input_tid}) = g_activation_pool + g_slot_offsets[{input_slot_idx}];
+    HW_BARRIER();  // 内存屏障确保初始化完成
+}}
+
+// ============== 推理函数 ==============
+
+int ecgformer_inference(const float* pinput_float, float* poutput_probs) {{
+'''
+        else:
+            # 静态模式: 预先分配
+            # 激活张量指向存储池 (使用指针算术)
+            for tid in sorted(self.activation_tensors):
+                if tid in offsets:
+                    code += f'    *(ptensors + {tid}) = g_activation_pool + {offsets[tid]};\n'
+            
+            code += '''    HW_BARRIER();  // 内存屏障确保初始化完成
 }
 
 // ============== 推理函数 ==============
 
 int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
-    int8_t* pin = *(ptensors + ''' + str(input_tid) + ''');
+'''
+        
+        code += f'''    int8_t* pin = *(ptensors + {input_tid});
     
     // 量化输入: 使用指针算术和volatile循环
-    for (volatile int i = 0; i < INPUT_SIZE; i++) {
+    for (volatile int i = 0; i < INPUT_SIZE; i++) {{
         float t0 = *(pinput_float + i);
         *(pin + i) = quantize_float(t0, INPUT_SCALE, INPUT_ZERO_POINT);
-    }
+    }}
     HW_BARRIER();
     
 '''
@@ -1028,7 +1229,15 @@ int main(int argc, char* argv[]) {{
         out_shape = out_info.get('shape', ())
         out_scale, out_zp = self._get_scale_zp(out_tid)
         
+        memory_mode = getattr(self, 'memory_mode', 'static')
+        
         code = f'    // Op#{op_id}: {op_type}\n'
+        
+        # 槽位复用模式: 在操作前设置输出张量指针
+        if memory_mode == 'reuse' and hasattr(self, 'slot_assignments'):
+            if out_tid in self.slot_assignments:
+                slot_idx = self.slot_assignments[out_tid]
+                code += f'    *(ptensors + {out_tid}) = g_activation_pool + g_slot_offsets[{slot_idx}];\n'
         
         if op_type == 'RESHAPE':
             in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
@@ -1981,6 +2190,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='生成ECGformer C实现代码')
     parser.add_argument('--modular', '-m', action='store_true',
                         help='生成模块化多文件版本（默认为单文件版本）')
+    parser.add_argument('--memory-mode', type=str, default='static',
+                        choices=['static', 'reuse'],
+                        help='内存管理模式: static=静态分配(默认), reuse=槽位复用')
     parser.add_argument('--output', '-o', type=str, default=None,
                         help='输出路径（单文件模式为.c文件路径，模块化模式为目录路径）')
     args = parser.parse_args()
@@ -1997,8 +2209,9 @@ if __name__ == '__main__':
     if args.modular:
         output_dir = args.output or os.path.join(SCRIPT_DIR, 'c_export_modular')
         print(f"\n模式: 模块化多文件")
+        print(f"内存模式: {args.memory_mode}")
         print(f"输出目录: {output_dir}\n")
-        generator.generate_modular(output_dir)
+        generator.generate_modular(output_dir, memory_mode=args.memory_mode)
     else:
         output_path = args.output or os.path.join(SCRIPT_DIR, 'c_export', 'ecgformer_standalone.c')
         print(f"\n模式: 单文件独立版")

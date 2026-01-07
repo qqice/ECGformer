@@ -13,7 +13,23 @@
 #define INPUT_SIZE 187
 #define OUTPUT_CLASSES 5
 #define NUM_TENSORS 262
-#define ACTIVATION_POOL_SIZE 4911196
+
+// 内存管理模式: reuse (槽位复用)
+#define MEMORY_MODE_REUSE 1
+
+// 槽位复用模式: 每个槽位可被多个张量复用
+#define NUM_MEMORY_SLOTS 5
+#define ACTIVATION_POOL_SIZE 631312
+
+// 槽位大小数组
+static const int g_slot_sizes[5] = {
+    23936, 279752, 23936, 23936, 279752
+};
+
+// 槽位偏移数组 (预计算)
+static const int g_slot_offsets[5] = {
+    0, 23936, 303688, 327624, 351560
+};
 
 // 输入量化参数
 #define INPUT_SCALE 3.5996969789e-02f
