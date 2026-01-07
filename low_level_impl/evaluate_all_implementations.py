@@ -381,13 +381,20 @@ def main():
     # 解析命令行参数
     import argparse
     parser = argparse.ArgumentParser(description='评估ECGformer模型实现')
-    parser.add_argument('--parallel', '-p', action='store_true', 
-                        help='使用多进程并行评估')
-    parser.add_argument('--workers', '-w', type=int, default=None,
-                        help='并行工作进程数 (默认: CPU核心数)')
+    parser.add_argument('--no-parallel', '-np', action='store_true', 
+                        help='禁用多进程并行评估 (默认启用并行)')
+    parser.add_argument('--workers', '-w', type=int, default=16,
+                        help='并行工作进程数 (默认: 16)')
     parser.add_argument('--samples', '-n', type=int, default=None,
                         help='评估样本数 (默认: 全部)')
+    #添加评估方法选择，允许选择多种方法，如--method tflite numpy c
+    parser.add_argument('--method', '-m', nargs='+', choices=['tflite', 'numpy', 'c'],
+                        default=['tflite', 'c'],
+                        help='选择要评估的实现方法 (默认: tflite, c)')
     args = parser.parse_args()
+    
+    # 默认启用并行，除非指定--no-parallel
+    args.parallel = not args.no_parallel
     
     # 加载测试数据
     X_test, y_test = load_test_data(test_csv, max_samples=args.samples)
@@ -399,27 +406,29 @@ def main():
         print("# 多进程并行评估模式")
         print("#" * 60)
         
-        num_workers = args.workers or min(multiprocessing.cpu_count(), 8)
+        num_workers = args.workers
         print(f"使用 {num_workers} 个工作进程")
         
-        # 1. 评估TFLite模型
-        print("\n" + "#" * 60)
-        print("# 1. TFLite 模型 (多进程)")
-        print("#" * 60)
-        tflite_result = evaluate_model_parallel(
-            "TFLite INT8", 'tflite', model_path, X_test, y_test, num_workers)
-        results.append(tflite_result)
-        
-        # 2. 评估NumPy整数实现
-        print("\n" + "#" * 60)
-        print("# 2. NumPy 整数实现 (多进程)")
-        print("#" * 60)
-        numpy_result = evaluate_model_parallel(
-            "NumPy Integer", 'numpy', model_path, X_test, y_test, num_workers)
-        results.append(numpy_result)
+        if 'tflite' in args.method:
+            # 1. 评估TFLite模型
+            print("\n" + "#" * 60)
+            print("# 1. TFLite 模型 (多进程)")
+            print("#" * 60)
+            tflite_result = evaluate_model_parallel(
+                "TFLite INT8", 'tflite', model_path, X_test, y_test, num_workers)
+            results.append(tflite_result)
+
+        if 'numpy' in args.method:
+            # 2. 评估NumPy整数实现
+            print("\n" + "#" * 60)
+            print("# 2. NumPy 整数实现 (多进程)")
+            print("#" * 60)
+            numpy_result = evaluate_model_parallel(
+                "NumPy Integer", 'numpy', model_path, X_test, y_test, num_workers)
+            results.append(numpy_result)
         
         # 3. 评估C实现
-        if HAS_C_IMPL:
+        if HAS_C_IMPL and 'c' in args.method:
             print("\n" + "#" * 60)
             print("# 3. C 实现 (多进程)")
             print("#" * 60)
@@ -431,36 +440,38 @@ def main():
             except Exception as e:
                 print(f"C实现评估失败: {e}")
     else:
-        # 单线程评估
-        # 1. 评估TFLite模型
-        print("\n" + "#" * 60)
-        print("# 1. TFLite 模型")
-        print("#" * 60)
+        if 'tflite' in args.method:
+            # 单线程评估
+            # 1. 评估TFLite模型
+            print("\n" + "#" * 60)
+            print("# 1. TFLite 模型")
+            print("#" * 60)
+            
+            tflite_runner = TFLiteRunner(model_path)
+            
+            def tflite_predict(x):
+                return tflite_runner.predict_class(x)
+            
+            tflite_result = evaluate_model("TFLite INT8", tflite_predict, X_test, y_test)
+            results.append(tflite_result)
         
-        tflite_runner = TFLiteRunner(model_path)
-        
-        def tflite_predict(x):
-            return tflite_runner.predict_class(x)
-        
-        tflite_result = evaluate_model("TFLite INT8", tflite_predict, X_test, y_test)
-        results.append(tflite_result)
-        
-        # 2. 评估NumPy整数实现
-        print("\n" + "#" * 60)
-        print("# 2. NumPy 整数实现")
-        print("#" * 60)
-        
-        numpy_model = IntegerOnlyECGformer(model_path)
-        
-        def numpy_predict(x):
-            output = numpy_model.forward(x)
-            return int(np.argmax(output))
-        
-        numpy_result = evaluate_model("NumPy Integer", numpy_predict, X_test, y_test)
-        results.append(numpy_result)
+        if 'numpy' in args.method:
+            # 2. 评估NumPy整数实现
+            print("\n" + "#" * 60)
+            print("# 2. NumPy 整数实现")
+            print("#" * 60)
+            
+            numpy_model = IntegerOnlyECGformer(model_path)
+            
+            def numpy_predict(x):
+                output = numpy_model.forward(x)
+                return int(np.argmax(output))
+            
+            numpy_result = evaluate_model("NumPy Integer", numpy_predict, X_test, y_test)
+            results.append(numpy_result)
         
         # 3. 评估C实现
-        if HAS_C_IMPL:
+        if HAS_C_IMPL and 'c' in args.method:
             print("\n" + "#" * 60)
             print("# 3. C 实现")
             print("#" * 60)
