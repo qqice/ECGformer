@@ -298,7 +298,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#1: ADD
     op_add(*(ptensors + 82), *(ptensors + 81), *(ptensors + 83), 187,
-           3.9215688048e-06f, -128, 3.9215688048e-06f, -128, 3.9215688048e-06f, -128);
+           65536, -128, 65536, -128, -128);
 
     // Op#2: SUB
     memset(*(ptensors + 84), 0, 187);
@@ -309,19 +309,19 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#4: MUL
     op_mul(*(ptensors + 84), *(ptensors + 85), *(ptensors + 86), 187,
-           7.8431368067e-09f, 0, 1.2401087582e-01f, -128, 7.8431368067e-09f, 0);
+           8127, 0, -128, 0);
 
     // Op#5: FULLY_CONNECTED
     op_fc(*(ptensors + 86), 187, 1, 128,
           (const int8_t*)*(ptensors + 80), (const int32_t*)*(ptensors + 79), *(ptensors + 87),
-          7.8431368067e-09f, 0, pscales_t80, 3.4209706428e-06f, -1);
+          0, pscales_q16_op5, -1);
 
     // Op#6: RESHAPE
     op_copy(*(ptensors + 87), *(ptensors + 88), 23936);
 
     // Op#7: ADD
     op_add(*(ptensors + 88), *(ptensors + 78), *(ptensors + 89), 23936,
-           3.4209706428e-06f, -1, 3.9215684033e-09f, 0, 3.4209290334e-06f, -1);
+           65537, -1, 75, 0, -1);
 
     // Op#8: TRANSPOSE
     op_transpose_4d(*(ptensors + 89), *(ptensors + 90), 1, 187, 8, 16, 0, 2, 1, 3);
@@ -329,18 +329,18 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#9: FULLY_CONNECTED
     op_fc(*(ptensors + 86), 187, 1, 128,
           (const int8_t*)*(ptensors + 77), (const int32_t*)*(ptensors + 76), *(ptensors + 91),
-          7.8431368067e-09f, 0, pscales_t77, 3.4717938888e-06f, 0);
+          0, pscales_q16_op9, 0);
 
     // Op#10: RESHAPE
     op_copy(*(ptensors + 91), *(ptensors + 92), 23936);
 
     // Op#11: ADD
     op_add(*(ptensors + 92), *(ptensors + 75), *(ptensors + 93), 23936,
-           3.4717938888e-06f, 0, 5.4321230181e-08f, -6, 3.4594715999e-06f, -1);
+           65769, 0, 1029, -6, -1);
 
     // Op#12: MUL
     op_mul(*(ptensors + 93), *(ptensors + 74), *(ptensors + 94), 23936,
-           3.4594715999e-06f, -1, 9.8039221484e-04f, -128, 8.6486789996e-07f, -1);
+           257, -1, -128, -1);
 
     // Op#13: TRANSPOSE
     op_transpose_4d(*(ptensors + 94), *(ptensors + 95), 1, 187, 8, 16, 0, 2, 3, 1);
@@ -348,7 +348,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#14: BATCH_MATMUL
     op_batch_matmul(*(ptensors + 90), *(ptensors + 95), *(ptensors + 96),
                     1, 8, 187, 16,
-                    3.4209290334e-06f, -1, 8.6486789996e-07f, -1, 8.5386897553e-09f, -3);
+                    23, -1, -1, -3);
 
     // Op#15: TRANSPOSE
     op_transpose_4d(*(ptensors + 96), *(ptensors + 97), 1, 8, 187, 187, 0, 1, 3, 2);
@@ -360,14 +360,14 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#17: FULLY_CONNECTED
     op_fc(*(ptensors + 86), 187, 1, 128,
           (const int8_t*)*(ptensors + 73), (const int32_t*)*(ptensors + 72), *(ptensors + 99),
-          7.8431368067e-09f, 0, pscales_t73, 3.5529558318e-06f, 2);
+          0, pscales_q16_op17, 2);
 
     // Op#18: RESHAPE
     op_copy(*(ptensors + 99), *(ptensors + 100), 23936);
 
     // Op#19: ADD
     op_add(*(ptensors + 100), *(ptensors + 71), *(ptensors + 101), 23936,
-           3.5529558318e-06f, 2, 5.5927419453e-05f, -14, 5.7683813793e-05f, -11);
+           4037, 2, 63541, -14, -11);
 
     // Op#20: TRANSPOSE
     op_transpose_4d(*(ptensors + 101), *(ptensors + 102), 1, 187, 8, 16, 0, 2, 1, 3);
@@ -375,7 +375,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#21: BATCH_MATMUL
     op_batch_matmul(*(ptensors + 98), *(ptensors + 102), *(ptensors + 103),
                     1, 8, 187, 187,
-                    3.9062500000e-03f, -128, 5.7683813793e-05f, -11, 5.7683741034e-05f, -11);
+                    256, -128, -11, -11);
 
     // Op#22: TRANSPOSE
     op_transpose_4d(*(ptensors + 103), *(ptensors + 104), 1, 8, 187, 16, 0, 2, 1, 3);
@@ -384,23 +384,22 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 104), *(ptensors + 105), 23936);
 
     // Op#24: FULLY_CONNECTED
-    { float* pws = (float*)malloc(1 << 2);
-      for(volatile int t0=0; t0<1; t0++) *(pws+t0)=4.1610049084e-04f;
+    { static const int32_t pws_q16[1] = {0};
     op_fc(*(ptensors + 105), 187, 128, 1,
           (const int8_t*)*(ptensors + 70), (const int32_t*)*(ptensors + 69), *(ptensors + 106),
-          5.7683741034e-05f, -11, pws, 3.5996966064e-02f, 22);
-      free(pws); }
+          -11, pws_q16, 22);
+    }
 
     // Op#25: ADD
     op_add(*(ptensors + 106), *(ptensors + 0), *(ptensors + 107), 187,
-           3.5996966064e-02f, 22, 3.5996969789e-02f, 22, 3.5996966064e-02f, 22);
+           65536, 22, 65536, 22, 22);
 
     // Op#26: SQUARED_DIFFERENCE
     memset(*(ptensors + 108), -128, 187);
 
     // Op#27: ADD
     op_add(*(ptensors + 108), *(ptensors + 81), *(ptensors + 109), 187,
-           3.9215688048e-06f, -128, 3.9215688048e-06f, -128, 3.9215688048e-06f, -128);
+           65536, -128, 65536, -128, -128);
 
     // Op#28: SUB
     memset(*(ptensors + 110), 0, 187);
@@ -411,7 +410,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#30: MUL
     op_mul(*(ptensors + 110), *(ptensors + 111), *(ptensors + 112), 187,
-           7.8431368067e-09f, 0, 1.2401087582e-01f, -128, 7.8431368067e-09f, 0);
+           8127, 0, -128, 0);
 
     // Op#31: EXPAND_DIMS
     op_copy(*(ptensors + 112), *(ptensors + 113), 187);
@@ -419,7 +418,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#32: CONV_2D
     op_fc(*(ptensors + 113), 187, 1, 4,
           (const int8_t*)*(ptensors + 68), (const int32_t*)*(ptensors + 64), *(ptensors + 114),
-          7.8431368067e-09f, 0, pscales_t68, 7.8431368067e-09f, 0);
+          0, pscales_q16_op32, 0);
 
     // Op#33: RESHAPE
     op_copy(*(ptensors + 114), *(ptensors + 115), 748);
@@ -428,30 +427,29 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 115), *(ptensors + 116), 748);
 
     // Op#35: CONV_2D
-    { float* pws = (float*)malloc(1 << 2);
-      for(volatile int t0=0; t0<1; t0++) *(pws+t0)=8.5356691852e-03f;
+    { static const int32_t pws_q16[1] = {559};
     op_fc(*(ptensors + 116), 187, 4, 1,
           (const int8_t*)*(ptensors + 63), (const int32_t*)*(ptensors + 59), *(ptensors + 117),
-          7.8431368067e-09f, 0, pws, 7.8431368067e-09f, 0);
-      free(pws); }
+          0, pws_q16, 0);
+    }
 
     // Op#36: RESHAPE
     op_copy(*(ptensors + 117), *(ptensors + 118), 187);
 
     // Op#37: ADD
     op_add(*(ptensors + 118), *(ptensors + 58), *(ptensors + 119), 187,
-           7.8431368067e-09f, 0, 3.4954844159e-04f, -128, 3.5996969789e-02f, 20);
+           0, 0, 636, -128, 20);
 
     // Op#38: ADD
     op_add(*(ptensors + 119), *(ptensors + 107), *(ptensors + 120), 187,
-           3.5996969789e-02f, 20, 3.5996966064e-02f, 22, 3.5996969789e-02f, 20);
+           65536, 20, 65536, 22, 20);
 
     // Op#39: SQUARED_DIFFERENCE
     memset(*(ptensors + 121), -128, 187);
 
     // Op#40: ADD
     op_add(*(ptensors + 121), *(ptensors + 81), *(ptensors + 122), 187,
-           3.9215688048e-06f, -128, 3.9215688048e-06f, -128, 3.9215688048e-06f, -128);
+           65536, -128, 65536, -128, -128);
 
     // Op#41: SUB
     memset(*(ptensors + 123), 0, 187);
@@ -462,19 +460,19 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#43: MUL
     op_mul(*(ptensors + 123), *(ptensors + 124), *(ptensors + 125), 187,
-           7.8431368067e-09f, 0, 1.2401087582e-01f, -128, 7.8431368067e-09f, 0);
+           8127, 0, -128, 0);
 
     // Op#44: FULLY_CONNECTED
     op_fc(*(ptensors + 125), 187, 1, 128,
           (const int8_t*)*(ptensors + 57), (const int32_t*)*(ptensors + 56), *(ptensors + 126),
-          7.8431368067e-09f, 0, pscales_t57, 1.8048147467e-05f, -1);
+          0, pscales_q16_op44, -1);
 
     // Op#45: RESHAPE
     op_copy(*(ptensors + 126), *(ptensors + 127), 23936);
 
     // Op#46: ADD
     op_add(*(ptensors + 127), *(ptensors + 55), *(ptensors + 128), 23936,
-           1.8048147467e-05f, -1, 3.9215684033e-09f, 0, 1.8048127458e-05f, -1);
+           65536, -1, 14, 0, -1);
 
     // Op#47: TRANSPOSE
     op_transpose_4d(*(ptensors + 128), *(ptensors + 129), 1, 187, 8, 16, 0, 2, 1, 3);
@@ -482,18 +480,18 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#48: FULLY_CONNECTED
     op_fc(*(ptensors + 125), 187, 1, 128,
           (const int8_t*)*(ptensors + 54), (const int32_t*)*(ptensors + 53), *(ptensors + 130),
-          7.8431368067e-09f, 0, pscales_t54, 1.8206761524e-05f, 1);
+          0, pscales_q16_op48, 1);
 
     // Op#49: RESHAPE
     op_copy(*(ptensors + 130), *(ptensors + 131), 23936);
 
     // Op#50: ADD
     op_add(*(ptensors + 131), *(ptensors + 52), *(ptensors + 132), 23936,
-           1.8206761524e-05f, 1, 1.3768246276e-07f, -6, 1.8162952983e-05f, 1);
+           65694, 1, 497, -6, 1);
 
     // Op#51: MUL
     op_mul(*(ptensors + 132), *(ptensors + 74), *(ptensors + 133), 23936,
-           1.8162952983e-05f, 1, 9.8039221484e-04f, -128, 4.5407382459e-06f, 1);
+           257, 1, -128, 1);
 
     // Op#52: TRANSPOSE
     op_transpose_4d(*(ptensors + 133), *(ptensors + 134), 1, 187, 8, 16, 0, 2, 3, 1);
@@ -501,7 +499,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#53: BATCH_MATMUL
     op_batch_matmul(*(ptensors + 129), *(ptensors + 134), *(ptensors + 135),
                     1, 8, 187, 16,
-                    1.8048127458e-05f, -1, 4.5407382459e-06f, 1, 2.1187917199e-08f, 29);
+                    253, -1, 1, 29);
 
     // Op#54: TRANSPOSE
     op_transpose_4d(*(ptensors + 135), *(ptensors + 136), 1, 8, 187, 187, 0, 1, 3, 2);
@@ -513,14 +511,14 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#56: FULLY_CONNECTED
     op_fc(*(ptensors + 125), 187, 1, 128,
           (const int8_t*)*(ptensors + 51), (const int32_t*)*(ptensors + 50), *(ptensors + 138),
-          7.8431368067e-09f, 0, pscales_t51, 1.9571607481e-05f, 0);
+          0, pscales_q16_op56, 0);
 
     // Op#57: RESHAPE
     op_copy(*(ptensors + 138), *(ptensors + 139), 23936);
 
     // Op#58: ADD
     op_add(*(ptensors + 139), *(ptensors + 49), *(ptensors + 140), 23936,
-           1.9571607481e-05f, 0, 4.9245376431e-05f, -6, 3.7824407627e-05f, 6);
+           33911, 0, 85324, -6, 6);
 
     // Op#59: TRANSPOSE
     op_transpose_4d(*(ptensors + 140), *(ptensors + 141), 1, 187, 8, 16, 0, 2, 1, 3);
@@ -528,7 +526,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#60: BATCH_MATMUL
     op_batch_matmul(*(ptensors + 137), *(ptensors + 141), *(ptensors + 142),
                     1, 8, 187, 187,
-                    3.9062500000e-03f, -128, 3.7824407627e-05f, 6, 3.7824371248e-05f, 6);
+                    256, -128, 6, 6);
 
     // Op#61: TRANSPOSE
     op_transpose_4d(*(ptensors + 142), *(ptensors + 143), 1, 8, 187, 16, 0, 2, 1, 3);
@@ -537,23 +535,22 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 143), *(ptensors + 144), 23936);
 
     // Op#63: FULLY_CONNECTED
-    { float* pws = (float*)malloc(1 << 2);
-      for(volatile int t0=0; t0<1; t0++) *(pws+t0)=3.9634574205e-04f;
+    { static const int32_t pws_q16[1] = {0};
     op_fc(*(ptensors + 144), 187, 128, 1,
           (const int8_t*)*(ptensors + 48), (const int32_t*)*(ptensors + 47), *(ptensors + 145),
-          3.7824371248e-05f, 6, pws, 3.5996966064e-02f, 20);
-      free(pws); }
+          6, pws_q16, 20);
+    }
 
     // Op#64: ADD
     op_add(*(ptensors + 145), *(ptensors + 120), *(ptensors + 146), 187,
-           3.5996966064e-02f, 20, 3.5996969789e-02f, 20, 3.5996966064e-02f, 20);
+           65536, 20, 65536, 20, 20);
 
     // Op#65: SQUARED_DIFFERENCE
     memset(*(ptensors + 147), -128, 187);
 
     // Op#66: ADD
     op_add(*(ptensors + 147), *(ptensors + 81), *(ptensors + 148), 187,
-           3.9215688048e-06f, -128, 3.9215688048e-06f, -128, 3.9215688048e-06f, -128);
+           65536, -128, 65536, -128, -128);
 
     // Op#67: SUB
     memset(*(ptensors + 149), 0, 187);
@@ -564,7 +561,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#69: MUL
     op_mul(*(ptensors + 149), *(ptensors + 150), *(ptensors + 151), 187,
-           7.8431368067e-09f, 0, 1.2401087582e-01f, -128, 7.8431368067e-09f, 0);
+           8127, 0, -128, 0);
 
     // Op#70: EXPAND_DIMS
     op_copy(*(ptensors + 151), *(ptensors + 152), 187);
@@ -572,7 +569,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#71: CONV_2D
     op_fc(*(ptensors + 152), 187, 1, 4,
           (const int8_t*)*(ptensors + 46), (const int32_t*)*(ptensors + 65), *(ptensors + 153),
-          7.8431368067e-09f, 0, pscales_t46, 7.8431368067e-09f, 0);
+          0, pscales_q16_op71, 0);
 
     // Op#72: RESHAPE
     op_copy(*(ptensors + 153), *(ptensors + 154), 748);
@@ -581,30 +578,29 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 154), *(ptensors + 155), 748);
 
     // Op#74: CONV_2D
-    { float* pws = (float*)malloc(1 << 2);
-      for(volatile int t0=0; t0<1; t0++) *(pws+t0)=4.4033546001e-03f;
+    { static const int32_t pws_q16[1] = {289};
     op_fc(*(ptensors + 155), 187, 4, 1,
           (const int8_t*)*(ptensors + 45), (const int32_t*)*(ptensors + 60), *(ptensors + 156),
-          7.8431368067e-09f, 0, pws, 7.8431368067e-09f, 0);
-      free(pws); }
+          0, pws_q16, 0);
+    }
 
     // Op#75: RESHAPE
     op_copy(*(ptensors + 156), *(ptensors + 157), 187);
 
     // Op#76: ADD
     op_add(*(ptensors + 157), *(ptensors + 44), *(ptensors + 158), 187,
-           7.8431368067e-09f, 0, 3.4954820876e-04f, -128, 3.5996966064e-02f, 17);
+           0, 0, 636, -128, 17);
 
     // Op#77: ADD
     op_add(*(ptensors + 158), *(ptensors + 146), *(ptensors + 159), 187,
-           3.5996966064e-02f, 17, 3.5996966064e-02f, 20, 3.5996966064e-02f, 17);
+           65536, 17, 65536, 20, 17);
 
     // Op#78: SQUARED_DIFFERENCE
     memset(*(ptensors + 160), -128, 187);
 
     // Op#79: ADD
     op_add(*(ptensors + 160), *(ptensors + 81), *(ptensors + 161), 187,
-           3.9215688048e-06f, -128, 3.9215688048e-06f, -128, 3.9215688048e-06f, -128);
+           65536, -128, 65536, -128, -128);
 
     // Op#80: SUB
     memset(*(ptensors + 162), 0, 187);
@@ -615,19 +611,19 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#82: MUL
     op_mul(*(ptensors + 162), *(ptensors + 163), *(ptensors + 164), 187,
-           7.8431368067e-09f, 0, 1.2401087582e-01f, -128, 7.8431368067e-09f, 0);
+           8127, 0, -128, 0);
 
     // Op#83: FULLY_CONNECTED
     op_fc(*(ptensors + 164), 187, 1, 128,
           (const int8_t*)*(ptensors + 43), (const int32_t*)*(ptensors + 42), *(ptensors + 165),
-          7.8431368067e-09f, 0, pscales_t43, 8.5654037321e-06f, -1);
+          0, pscales_q16_op83, -1);
 
     // Op#84: RESHAPE
     op_copy(*(ptensors + 165), *(ptensors + 166), 23936);
 
     // Op#85: ADD
     op_add(*(ptensors + 166), *(ptensors + 41), *(ptensors + 167), 23936,
-           8.5654037321e-06f, -1, 3.9215684033e-09f, 0, 8.5653437054e-06f, -1);
+           65536, -1, 30, 0, -1);
 
     // Op#86: TRANSPOSE
     op_transpose_4d(*(ptensors + 167), *(ptensors + 168), 1, 187, 8, 16, 0, 2, 1, 3);
@@ -635,18 +631,18 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#87: FULLY_CONNECTED
     op_fc(*(ptensors + 164), 187, 1, 128,
           (const int8_t*)*(ptensors + 40), (const int32_t*)*(ptensors + 39), *(ptensors + 169),
-          7.8431368067e-09f, 0, pscales_t40, 8.8167744252e-06f, -2);
+          0, pscales_q16_op87, -2);
 
     // Op#88: RESHAPE
     op_copy(*(ptensors + 169), *(ptensors + 170), 23936);
 
     // Op#89: ADD
     op_add(*(ptensors + 170), *(ptensors + 38), *(ptensors + 171), 23936,
-           8.8167744252e-06f, -2, 8.5421326901e-08f, -1, 8.8170627350e-06f, -2);
+           65534, -2, 635, -1, -2);
 
     // Op#90: MUL
     op_mul(*(ptensors + 171), *(ptensors + 74), *(ptensors + 172), 23936,
-           8.8170627350e-06f, -2, 9.8039221484e-04f, -128, 2.2042656838e-06f, -2);
+           257, -2, -128, -2);
 
     // Op#91: TRANSPOSE
     op_transpose_4d(*(ptensors + 172), *(ptensors + 173), 1, 187, 8, 16, 0, 2, 3, 1);
@@ -654,7 +650,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#92: BATCH_MATMUL
     op_batch_matmul(*(ptensors + 168), *(ptensors + 173), *(ptensors + 174),
                     1, 8, 187, 16,
-                    8.5653437054e-06f, -1, 2.2042656838e-06f, -2, 4.2088466046e-09f, -73);
+                    294, -1, -2, -73);
 
     // Op#93: TRANSPOSE
     op_transpose_4d(*(ptensors + 174), *(ptensors + 175), 1, 8, 187, 187, 0, 1, 3, 2);
@@ -666,14 +662,14 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#95: FULLY_CONNECTED
     op_fc(*(ptensors + 164), 187, 1, 128,
           (const int8_t*)*(ptensors + 37), (const int32_t*)*(ptensors + 36), *(ptensors + 177),
-          7.8431368067e-09f, 0, pscales_t37, 8.8702890935e-06f, -2);
+          0, pscales_q16_op95, -2);
 
     // Op#96: RESHAPE
     op_copy(*(ptensors + 177), *(ptensors + 178), 23936);
 
     // Op#97: ADD
     op_add(*(ptensors + 178), *(ptensors + 35), *(ptensors + 179), 23936,
-           8.8702890935e-06f, -2, 4.1749022785e-05f, -8, 4.3648789870e-05f, 0);
+           13318, -2, 62684, -8, 0);
 
     // Op#98: TRANSPOSE
     op_transpose_4d(*(ptensors + 179), *(ptensors + 180), 1, 187, 8, 16, 0, 2, 1, 3);
@@ -681,7 +677,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#99: BATCH_MATMUL
     op_batch_matmul(*(ptensors + 176), *(ptensors + 180), *(ptensors + 181),
                     1, 8, 187, 187,
-                    3.9062500000e-03f, -128, 4.3648789870e-05f, 0, 4.3648738938e-05f, 0);
+                    256, -128, 0, 0);
 
     // Op#100: TRANSPOSE
     op_transpose_4d(*(ptensors + 181), *(ptensors + 182), 1, 8, 187, 16, 0, 2, 1, 3);
@@ -690,23 +686,22 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 182), *(ptensors + 183), 23936);
 
     // Op#102: FULLY_CONNECTED
-    { float* pws = (float*)malloc(1 << 2);
-      for(volatile int t0=0; t0<1; t0++) *(pws+t0)=2.1708158602e-04f;
+    { static const int32_t pws_q16[1] = {0};
     op_fc(*(ptensors + 183), 187, 128, 1,
           (const int8_t*)*(ptensors + 34), (const int32_t*)*(ptensors + 33), *(ptensors + 184),
-          4.3648738938e-05f, 0, pws, 3.5996966064e-02f, 17);
-      free(pws); }
+          0, pws_q16, 17);
+    }
 
     // Op#103: ADD
     op_add(*(ptensors + 184), *(ptensors + 159), *(ptensors + 185), 187,
-           3.5996966064e-02f, 17, 3.5996966064e-02f, 17, 3.5996966064e-02f, 17);
+           65536, 17, 65536, 17, 17);
 
     // Op#104: SQUARED_DIFFERENCE
     memset(*(ptensors + 186), -128, 187);
 
     // Op#105: ADD
     op_add(*(ptensors + 186), *(ptensors + 81), *(ptensors + 187), 187,
-           3.9215688048e-06f, -128, 3.9215688048e-06f, -128, 3.9215688048e-06f, -128);
+           65536, -128, 65536, -128, -128);
 
     // Op#106: SUB
     memset(*(ptensors + 188), 0, 187);
@@ -717,7 +712,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#108: MUL
     op_mul(*(ptensors + 188), *(ptensors + 189), *(ptensors + 190), 187,
-           7.8431368067e-09f, 0, 1.2401087582e-01f, -128, 7.8431368067e-09f, 0);
+           8127, 0, -128, 0);
 
     // Op#109: EXPAND_DIMS
     op_copy(*(ptensors + 190), *(ptensors + 191), 187);
@@ -725,7 +720,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#110: CONV_2D
     op_fc(*(ptensors + 191), 187, 1, 4,
           (const int8_t*)*(ptensors + 32), (const int32_t*)*(ptensors + 66), *(ptensors + 192),
-          7.8431368067e-09f, 0, pscales_t32, 7.8431368067e-09f, 0);
+          0, pscales_q16_op110, 0);
 
     // Op#111: RESHAPE
     op_copy(*(ptensors + 192), *(ptensors + 193), 748);
@@ -734,30 +729,29 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 193), *(ptensors + 194), 748);
 
     // Op#113: CONV_2D
-    { float* pws = (float*)malloc(1 << 2);
-      for(volatile int t0=0; t0<1; t0++) *(pws+t0)=3.3950232901e-03f;
+    { static const int32_t pws_q16[1] = {222};
     op_fc(*(ptensors + 194), 187, 4, 1,
           (const int8_t*)*(ptensors + 31), (const int32_t*)*(ptensors + 61), *(ptensors + 195),
-          7.8431368067e-09f, 0, pws, 7.8431368067e-09f, 0);
-      free(pws); }
+          0, pws_q16, 0);
+    }
 
     // Op#114: RESHAPE
     op_copy(*(ptensors + 195), *(ptensors + 196), 187);
 
     // Op#115: ADD
     op_add(*(ptensors + 196), *(ptensors + 30), *(ptensors + 197), 187,
-           7.8431368067e-09f, 0, 3.4954832518e-04f, -128, 3.5996966064e-02f, 15);
+           0, 0, 636, -128, 15);
 
     // Op#116: ADD
     op_add(*(ptensors + 197), *(ptensors + 185), *(ptensors + 198), 187,
-           3.5996966064e-02f, 15, 3.5996966064e-02f, 17, 3.5996966064e-02f, 15);
+           65536, 15, 65536, 17, 15);
 
     // Op#117: SQUARED_DIFFERENCE
     memset(*(ptensors + 199), -128, 187);
 
     // Op#118: ADD
     op_add(*(ptensors + 199), *(ptensors + 81), *(ptensors + 200), 187,
-           3.9215688048e-06f, -128, 3.9215688048e-06f, -128, 3.9215688048e-06f, -128);
+           65536, -128, 65536, -128, -128);
 
     // Op#119: SUB
     memset(*(ptensors + 201), 0, 187);
@@ -768,19 +762,19 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#121: MUL
     op_mul(*(ptensors + 201), *(ptensors + 202), *(ptensors + 203), 187,
-           7.8431368067e-09f, 0, 1.2401087582e-01f, -128, 7.8431368067e-09f, 0);
+           8127, 0, -128, 0);
 
     // Op#122: FULLY_CONNECTED
     op_fc(*(ptensors + 203), 187, 1, 128,
           (const int8_t*)*(ptensors + 29), (const int32_t*)*(ptensors + 28), *(ptensors + 204),
-          7.8431368067e-09f, 0, pscales_t29, 4.5233937840e-07f, -2);
+          0, pscales_q16_op122, -2);
 
     // Op#123: RESHAPE
     op_copy(*(ptensors + 204), *(ptensors + 205), 23936);
 
     // Op#124: ADD
     op_add(*(ptensors + 205), *(ptensors + 27), *(ptensors + 206), 23936,
-           4.5233937840e-07f, -2, 3.9215684033e-09f, 0, 4.5233127821e-07f, -2);
+           65537, -2, 568, 0, -2);
 
     // Op#125: TRANSPOSE
     op_transpose_4d(*(ptensors + 206), *(ptensors + 207), 1, 187, 8, 16, 0, 2, 1, 3);
@@ -788,18 +782,18 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#126: FULLY_CONNECTED
     op_fc(*(ptensors + 203), 187, 1, 128,
           (const int8_t*)*(ptensors + 26), (const int32_t*)*(ptensors + 25), *(ptensors + 208),
-          7.8431368067e-09f, 0, pscales_t26, 4.5768948098e-07f, -1);
+          0, pscales_q16_op126, -1);
 
     // Op#127: RESHAPE
     op_copy(*(ptensors + 208), *(ptensors + 209), 23936);
 
     // Op#128: ADD
     op_add(*(ptensors + 209), *(ptensors + 24), *(ptensors + 210), 23936,
-           4.5768948098e-07f, -1, 1.2812115813e-07f, 5, 4.8657540219e-07f, 1);
+           61645, -1, 17256, 5, 1);
 
     // Op#129: MUL
     op_mul(*(ptensors + 210), *(ptensors + 74), *(ptensors + 211), 23936,
-           4.8657540219e-07f, 1, 9.8039221484e-04f, -128, 1.2164385055e-07f, 1);
+           257, 1, -128, 1);
 
     // Op#130: TRANSPOSE
     op_transpose_4d(*(ptensors + 211), *(ptensors + 212), 1, 187, 8, 16, 0, 2, 3, 1);
@@ -807,7 +801,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#131: BATCH_MATMUL
     op_batch_matmul(*(ptensors + 207), *(ptensors + 212), *(ptensors + 213),
                     1, 8, 187, 16,
-                    4.5233127821e-07f, -2, 1.2164385055e-07f, 1, 7.8685573612e-09f, 0);
+                    0, -2, 1, 0);
 
     // Op#132: TRANSPOSE
     op_transpose_4d(*(ptensors + 213), *(ptensors + 214), 1, 8, 187, 187, 0, 1, 3, 2);
@@ -819,14 +813,14 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#134: FULLY_CONNECTED
     op_fc(*(ptensors + 203), 187, 1, 128,
           (const int8_t*)*(ptensors + 23), (const int32_t*)*(ptensors + 22), *(ptensors + 216),
-          7.8431368067e-09f, 0, pscales_t23, 4.5547096761e-07f, -7);
+          0, pscales_q16_op134, -7);
 
     // Op#135: RESHAPE
     op_copy(*(ptensors + 216), *(ptensors + 217), 23936);
 
     // Op#136: ADD
     op_add(*(ptensors + 217), *(ptensors + 21), *(ptensors + 218), 23936,
-           4.5547096761e-07f, -7, 2.9470964364e-05f, -5, 2.9520904718e-05f, -4);
+           1011, -7, 65425, -5, -4);
 
     // Op#137: TRANSPOSE
     op_transpose_4d(*(ptensors + 218), *(ptensors + 219), 1, 187, 8, 16, 0, 2, 1, 3);
@@ -834,7 +828,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#138: BATCH_MATMUL
     op_batch_matmul(*(ptensors + 215), *(ptensors + 219), *(ptensors + 220),
                     1, 8, 187, 187,
-                    3.9062500000e-03f, -128, 2.9520904718e-05f, -4, 2.9520893804e-05f, -4);
+                    256, -128, -4, -4);
 
     // Op#139: TRANSPOSE
     op_transpose_4d(*(ptensors + 220), *(ptensors + 221), 1, 8, 187, 16, 0, 2, 1, 3);
@@ -843,23 +837,22 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 221), *(ptensors + 222), 23936);
 
     // Op#141: FULLY_CONNECTED
-    { float* pws = (float*)malloc(1 << 2);
-      for(volatile int t0=0; t0<1; t0++) *(pws+t0)=2.9882427771e-04f;
+    { static const int32_t pws_q16[1] = {0};
     op_fc(*(ptensors + 222), 187, 128, 1,
           (const int8_t*)*(ptensors + 20), (const int32_t*)*(ptensors + 19), *(ptensors + 223),
-          2.9520893804e-05f, -4, pws, 3.5996966064e-02f, 15);
-      free(pws); }
+          -4, pws_q16, 15);
+    }
 
     // Op#142: ADD
     op_add(*(ptensors + 223), *(ptensors + 198), *(ptensors + 224), 187,
-           3.5996966064e-02f, 15, 3.5996966064e-02f, 15, 3.5996966064e-02f, 15);
+           65536, 15, 65536, 15, 15);
 
     // Op#143: SQUARED_DIFFERENCE
     memset(*(ptensors + 225), -128, 187);
 
     // Op#144: ADD
     op_add(*(ptensors + 225), *(ptensors + 81), *(ptensors + 226), 187,
-           3.9215688048e-06f, -128, 3.9215688048e-06f, -128, 3.9215688048e-06f, -128);
+           65536, -128, 65536, -128, -128);
 
     // Op#145: SUB
     memset(*(ptensors + 227), 0, 187);
@@ -870,7 +863,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#147: MUL
     op_mul(*(ptensors + 227), *(ptensors + 228), *(ptensors + 229), 187,
-           7.8431368067e-09f, 0, 1.2401087582e-01f, -128, 7.8431368067e-09f, 0);
+           8127, 0, -128, 0);
 
     // Op#148: EXPAND_DIMS
     op_copy(*(ptensors + 229), *(ptensors + 230), 187);
@@ -878,7 +871,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     // Op#149: CONV_2D
     op_fc(*(ptensors + 230), 187, 1, 4,
           (const int8_t*)*(ptensors + 18), (const int32_t*)*(ptensors + 67), *(ptensors + 231),
-          7.8431368067e-09f, 0, pscales_t18, 7.8431368067e-09f, 0);
+          0, pscales_q16_op149, 0);
 
     // Op#150: RESHAPE
     op_copy(*(ptensors + 231), *(ptensors + 232), 748);
@@ -887,43 +880,42 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 232), *(ptensors + 233), 748);
 
     // Op#152: CONV_2D
-    { float* pws = (float*)malloc(1 << 2);
-      for(volatile int t0=0; t0<1; t0++) *(pws+t0)=8.1268763170e-03f;
+    { static const int32_t pws_q16[1] = {533};
     op_fc(*(ptensors + 233), 187, 4, 1,
           (const int8_t*)*(ptensors + 17), (const int32_t*)*(ptensors + 62), *(ptensors + 234),
-          7.8431368067e-09f, 0, pws, 7.8431368067e-09f, 0);
-      free(pws); }
+          0, pws_q16, 0);
+    }
 
     // Op#153: RESHAPE
     op_copy(*(ptensors + 234), *(ptensors + 235), 187);
 
     // Op#154: ADD
     op_add(*(ptensors + 235), *(ptensors + 16), *(ptensors + 236), 187,
-           7.8431368067e-09f, 0, 3.4954876173e-04f, -128, 3.5996966064e-02f, 12);
+           0, 0, 636, -128, 12);
 
     // Op#155: ADD
     op_add(*(ptensors + 236), *(ptensors + 224), *(ptensors + 237), 187,
-           3.5996966064e-02f, 12, 3.5996966064e-02f, 15, 3.5996966064e-02f, 12);
+           65536, 12, 65536, 15, 12);
 
     // Op#156: MEAN
     op_mean(*(ptensors + 237), *(ptensors + 238),
             187, 1, 1,
-            3.5996966064e-02f, 12, 3.5996966064e-02f, 12);
+            65536, 12, 12);
 
     // Op#157: FULLY_CONNECTED
     op_fc(*(ptensors + 238), 1, 187, 128,
           (const int8_t*)*(ptensors + 15), (const int32_t*)*(ptensors + 14), *(ptensors + 239),
-          3.5996966064e-02f, 12, pscales_t15, 2.6135431603e-02f, -128);
+          12, pscales_q16_op157, -128);
 
     // Op#158: FULLY_CONNECTED
     op_fc(*(ptensors + 239), 1, 128, 64,
           (const int8_t*)*(ptensors + 13), (const int32_t*)*(ptensors + 12), *(ptensors + 240),
-          2.6135431603e-02f, -128, pscales_t13, 3.1560700387e-02f, -128);
+          -128, pscales_q16_op158, -128);
 
     // Op#159: FULLY_CONNECTED
     op_fc(*(ptensors + 240), 1, 64, 5,
           (const int8_t*)*(ptensors + 11), (const int32_t*)*(ptensors + 10), *(ptensors + 241),
-          3.1560700387e-02f, -128, pscales_t11, 1.9118081033e-01f, 14);
+          -128, pscales_q16_op159, 14);
 
     // Op#160: SOFTMAX
     op_softmax(*(ptensors + 241), *(ptensors + 242), 1, 5,

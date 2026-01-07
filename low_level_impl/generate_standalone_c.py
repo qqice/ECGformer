@@ -140,7 +140,49 @@ class ECGformerCGenerator:
         
         # 从常量张量中移除激活张量
         self.constant_tensors -= self.activation_tensors
+        
+        # 预扫描收集 per-channel Q16 scales (适配INT26)
+        self._precompute_q16_scales()
     
+    def _precompute_q16_scales(self):
+        """预扫描所有操作，收集 per-channel Q16 scales (适配26位中间结果)"""
+        self.q16_scales = {}  # {op_index: {'weight_tid': tid, 'scales_q16': [...]}}
+        
+        for op in self.ops:
+            op_type = op['type']
+            op_idx = op['id']
+            inputs = op['inputs']
+            outputs = op['outputs']
+            
+            if op_type in ('FULLY_CONNECTED', 'CONV_2D'):
+                if len(inputs) < 2:
+                    continue
+                    
+                weight_tid = inputs[1]
+                out_tid = outputs[0] if len(outputs) > 0 else -1
+                
+                # 获取输入和输出的 scale
+                si, zi = self._get_scale_zp(inputs[0])
+                so, zo = self._get_scale_zp(out_tid)
+                
+                # 获取权重的 per-channel scales
+                weight_info = self.tensors_info.get(weight_tid, {})
+                weight_scales = weight_info.get('scales', np.array([]))
+                
+                if len(weight_scales) > 1:
+                    # 预计算 Q16: scale_q16[o] = (si * weight_scale[o] / so) * (1<<16)
+                    # Q16 适配 INT26 中间结果: acc(~20bit) * scale(~16bit) >> 16 = ~20bit
+                    scales_q16 = []
+                    for ws in weight_scales:
+                        eff = (si * ws / so) * (1 << 16)
+                        scales_q16.append(int(round(eff)))
+                    
+                    self.q16_scales[op_idx] = {
+                        'weight_tid': weight_tid,
+                        'scales_q16': scales_q16,
+                        'chn_out': len(weight_scales)
+                    }
+
     def _get_scale_zp(self, tid):
         """获取张量的scale和zero_point"""
         info = self.tensors_info.get(tid, {})
@@ -355,67 +397,46 @@ static const char* CLASS_NAMES[5] = {{"N (正常)", "S (室上性)", "V (室性)
         print(f"  生成: ecgformer_biases.h")
     
     def _generate_quant_header(self, output_dir: str):
-        """生成量化参数头文件 - Bare-metal Style (无结构体)"""
+        """生成量化参数头文件 - Bare-metal Style (无结构体, Q16格式适配INT26)"""
         code = '''/**
  * ECGformer 量化参数 - Bare-metal Style
  * 自动生成 - 请勿手动修改
  * 
  * 注意: 不使用结构体, 使用扁平数组以便直接硬件访问
+ * Q16格式: scale = (int32_t)((si * weight_scale / so) * (1<<16))
+ * 适配INT26中间结果: acc(~20bit) * scale(~16bit) = ~36bit, >> 16后 = ~20bit
  */
 
 #ifndef ECGFORMER_QUANT_H
 #define ECGFORMER_QUANT_H
 
-// ============== Per-Channel 量化参数 ==============
+#include <stdint.h>
+
+// ============== 预计算的 Per-Channel Q16 Scales ==============
+// Q16格式: 已预计算 (si * weight_scale[o] / so) * (1<<16)
+// 每个操作有独立的 Q16 scale 数组 (以操作索引命名)
+// 使用 int32_t 适配嵌入式硬件
 
 '''
         
-        # 为有多通道scale的张量生成scale数组
-        for tid in sorted(self.constant_tensors):
-            info = self.tensors_info.get(tid, {})
-            scales = info.get('scales', np.array([]))
-            zps = info.get('zps', np.array([]))
+        # 生成预计算的 Q16 scales (以操作索引命名)
+        for op_idx in sorted(self.q16_scales.keys()):
+            info = self.q16_scales[op_idx]
+            scales_q16 = info['scales_q16']
+            chn_out = info['chn_out']
+            weight_tid = info['weight_tid']
             
-            if len(scales) > 1:
-                code += f'// 张量 {tid} 的per-channel scales ({len(scales)} channels)\n'
-                code += f'static const float pscales_t{tid}[{len(scales)}] = {{\n    '
-                for i, s in enumerate(scales):
-                    code += f'{s:.10e}f'
-                    if i < len(scales) - 1:
-                        code += ', '
-                        if (i + 1) % 4 == 0:
-                            code += '\n    '
-                code += '\n};\n\n'
+            code += f'// Op#{op_idx} 的 per-channel Q16 scales (权重张量 {weight_tid}, {chn_out} channels)\n'
+            code += f'static const int32_t pscales_q16_op{op_idx}[{chn_out}] = {{\n    '
+            for i, sq16 in enumerate(scales_q16):
+                code += f'{sq16}'
+                if i < chn_out - 1:
+                    code += ', '
+                    if (i + 1) % 4 == 0:
+                        code += '\n    '
+            code += '\n};\n\n'
         
         code += '''
-// ============== 扁平量化参数数组 (无结构体) ==============
-// 使用两个独立数组: pscales_tensor[] 和 pzeropoints_tensor[]
-// 索引对应张量ID
-
-'''
-        
-        # 生成所有张量的scale数组
-        code += f'// 所有张量的scale (索引=张量ID)\n'
-        code += f'static const float pscales_tensor[{len(self.tensors_info)}] = {{\n'
-        for tid in range(len(self.tensors_info)):
-            scale, _ = self._get_scale_zp(tid)
-            code += f'    /* T{tid} */ {scale:.10e}f,\n'
-        code += '};\n\n'
-        
-        # 生成所有张量的zero_point数组
-        code += f'// 所有张量的zero_point (索引=张量ID)\n'
-        code += f'static const int32_t pzeropoints_tensor[{len(self.tensors_info)}] = {{\n'
-        for tid in range(len(self.tensors_info)):
-            _, zp = self._get_scale_zp(tid)
-            code += f'    /* T{tid} */ {zp},\n'
-        code += '};\n\n'
-        
-        # 添加内联访问宏
-        code += '''// ============== 访问宏 (替代结构体访问) ==============
-// 使用指针算术访问: *(pscales_tensor + tid), *(pzeropoints_tensor + tid)
-#define GET_SCALE(tid)      (*(pscales_tensor + (tid)))
-#define GET_ZEROPOINT(tid)  (*(pzeropoints_tensor + (tid)))
-
 #endif // ECGFORMER_QUANT_H
 '''
         
@@ -479,6 +500,9 @@ static const char* CLASS_NAMES[5] = {{"N (正常)", "S (室上性)", "V (室性)
 #define HW_QUANT(out, in, s)  asm volatile(".insn r 0x0b, 0x2, 0x00, %0, %1, %2" : "=r"(out) : "r"(in), "r"(s))
 
 // ============== 辅助函数 ==============
+// Q16 定点格式: scale = (int32_t)((1.0 / float_scale) * (1 << 16))
+// 量化公式: out = ((acc * scale) >> 16) + zp
+// 适配INT26中间结果: 使用纯int32_t运算
 
 static inline int8_t saturate_int8(int32_t t0) {
     if (t0 > 127) return 127;
@@ -486,94 +510,130 @@ static inline int8_t saturate_int8(int32_t t0) {
     return (int8_t)t0;
 }
 
-static inline int8_t quantize_float(float t0, float scale, int32_t zp) {
-    return saturate_int8((int32_t)roundf(t0 / scale) + zp);
+// Q16 定点量化: out = ((val * scale) >> 16) + zp
+// 注意: 使用分步计算避免溢出, 适配INT26硬件
+static inline int8_t quantize_q16(int32_t t0, int32_t scale, int32_t zp) {
+    // 分步右移: 先右移8位, 乘scale, 再右移8位
+    int32_t t1 = (t0 >> 8) * scale;  // ~18bit * ~16bit = ~34bit, 但先右移8位控制在26位内
+    int32_t t2 = t1 >> 8;            // 总共右移16位
+    return saturate_int8(t2 + zp);
 }
 
+// 浮点输入量化 (仅用于外部接口，计算路径使用Q16)
+static inline int8_t quantize_float(float t0, float scale, int32_t zp) {
+    int32_t t1 = (int32_t)roundf(t0 / scale) + zp;
+    return saturate_int8(t1);
+}
+
+// 反量化 (仅用于外部接口/调试)
 static inline float dequantize_int8(int8_t t0, float scale, int32_t zp) {
     return ((float)t0 - (float)zp) * scale;
 }
 
 // ============== 元素级操作 ==============
+// Q16格式: scale参数 = (int32_t)((1.0/float_scale) * (1<<16))
 
-// 元素级加法: pout[i] = pin1[i] + pin2[i] (量化)
+// 元素级加法: pout[i] = pin1[i] + pin2[i] (Q16定点)
+// scale1 = (s1/so) * (1<<16), scale2 = (s2/so) * (1<<16)
 static void op_add(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
-                   float s1, int z1, float s2, int z2, float so, int zo) {
-    float t0 = s1 / so;
-    float t1 = s2 / so;
+                   int32_t scale1, int z1, int32_t scale2, int z2, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t2 = ((float)pin1[i] - z1) * t0 + ((float)pin2[i] - z2) * t1;
-        pout[i] = saturate_int8((int32_t)roundf(t2) + zo);
+        int32_t t0 = (int32_t)*(pin1 + i) - z1;
+        int32_t t1 = (int32_t)*(pin2 + i) - z2;
+        // Q16加法: ((t0 * scale1) + (t1 * scale2)) >> 16
+        int32_t t2 = (t0 * scale1 + t1 * scale2) >> 16;
+        *(pout + i) = saturate_int8(t2 + zo);
     }
 }
 
-// 元素级减法: pout[i] = pin1[i] - pin2[i] (量化)
+// 元素级减法: pout[i] = pin1[i] - pin2[i] (Q16定点)
+// scale1 = (s1/so) * (1<<16), scale2 = (s2/so) * (1<<16)
 static void op_sub(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
-                   float s1, int z1, float s2, int z2, float so, int zo) {
-    float t0 = s1 / so;
-    float t1 = s2 / so;
+                   int32_t scale1, int z1, int32_t scale2, int z2, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t2 = ((float)pin1[i] - z1) * t0 - ((float)pin2[i] - z2) * t1;
-        pout[i] = saturate_int8((int32_t)roundf(t2) + zo);
+        int32_t t0 = (int32_t)*(pin1 + i) - z1;
+        int32_t t1 = (int32_t)*(pin2 + i) - z2;
+        // Q16减法: ((t0 * scale1) - (t1 * scale2)) >> 16
+        int32_t t2 = (t0 * scale1 - t1 * scale2) >> 16;
+        *(pout + i) = saturate_int8(t2 + zo);
     }
 }
 
-// 元素级乘法: pout[i] = pin1[i] * pin2[i] (量化)
+// 元素级乘法: pout[i] = pin1[i] * pin2[i] (Q16定点)
+// scale = (s1 * s2 / so) * (1<<16)
 static void op_mul(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
-                   float s1, int z1, float s2, int z2, float so, int zo) {
-    float t0 = (s1 * s2) / so;
+                   int32_t scale, int z1, int z2, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t1 = ((float)pin1[i] - z1) * ((float)pin2[i] - z2) * t0;
-        pout[i] = saturate_int8((int32_t)roundf(t1) + zo);
+        int32_t t0 = (int32_t)*(pin1 + i) - z1;
+        int32_t t1 = (int32_t)*(pin2 + i) - z2;
+        int32_t t2 = t0 * t1;  // 累积乘积 (~16bit)
+        // Q16量化: (t2 * scale) >> 16, 分步计算避免溢出
+        int32_t t3 = ((t2 >> 8) * scale) >> 8;
+        *(pout + i) = saturate_int8(t3 + zo);
     }
 }
 
-// 平方差: pout[i] = (pin1[i] - pin2[i])^2
+// 平方差: pout[i] = (pin1[i] - pin2[i])^2 (Q16定点)
+// scale_diff = (s2/s1) * (1<<16), scale_out = (s1*s1/so) * (1<<16)
 static void op_squared_diff(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
-                            float s1, int z1, float s2, int z2, float so, int zo) {
-    float t0 = (s1 * s1) / so;
-    float t1 = s2 / s1;
+                            int32_t scale_diff, int z1, int z2, int32_t scale_out, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t2 = ((float)pin1[i] - z1) - ((float)pin2[i] - z2) * t1;
-        float t3 = t2 * t2 * t0;
-        pout[i] = saturate_int8((int32_t)roundf(t3) + zo);
+        int32_t t0 = (int32_t)*(pin1 + i) - z1;
+        int32_t t1 = (int32_t)*(pin2 + i) - z2;
+        // 先计算差值 (Q16): t0 - (t1 * scale_diff) >> 16
+        int32_t t2 = (t1 * scale_diff) >> 16;
+        int32_t t3 = t0 - t2;
+        // 平方后量化: (t3 * t3 * scale_out) >> 16, 分步计算
+        int32_t t4 = ((t3 * t3) >> 8);
+        int32_t t5 = (t4 * scale_out) >> 8;
+        *(pout + i) = saturate_int8(t5 + zo);
     }
 }
 
 // ============== 激活函数 ==============
 
 // 倒数平方根: pout[i] = 1/sqrt(pin[i])
+// 注: rsqrt核心需要浮点, 量化输入/输出使用Q22
+// scale_in = si * (1<<22), scale_out = (1/so) * (1<<22)
 static void op_rsqrt(const int8_t* pin, int8_t* pout, int len,
-                     float si, int zi, float so, int zo) {
+                     float scale_in, int zi, float scale_out, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t0 = ((float)pin[i] - zi) * si;
-        float t1 = 1.0f / sqrtf(fmaxf(t0, 1e-12f));
-        pout[i] = saturate_int8((int32_t)roundf(t1 / so) + zo);
+        int32_t t0 = (int32_t)*(pin + i) - zi;
+        float t1 = (float)t0 * scale_in;  // 反量化
+        if (t1 <= 0) t1 = 1e-10f;  // 防止除零
+        float t2 = 1.0f / sqrtf(t1);  // rsqrt
+        int32_t t3 = (int32_t)roundf(t2 / scale_out) + zo;  // 量化输出
+        *(pout + i) = saturate_int8(t3);
     }
 }
 
-// Softmax: 沿最后一个维度, 使用指针算术
+// Softmax: 沿最后一个维度
+// 注: softmax核心需要exp, 使用浮点计算, 量化输入/输出
 static void op_softmax(const int8_t* pin, int8_t* pout, int nbatch, int nclass,
-                       float si, int zi, float so, int zo) {
-    float* pvals = (float*)malloc(nclass << 2);  // nclass * sizeof(float) = nclass * 4
+                       float scale_in, int zi, float scale_out, int zo) {
+    float* pvals = (float*)malloc(nclass * sizeof(float));
     for (volatile int b = 0; b < nbatch; b++) {
-        int base = b * nclass;  // 手动偏移计算
+        int base = b * nclass;
         float t0 = -1e9f;  // max_val
-        // 第一遍: 找最大值并反量化
+        // 第一遍: 反量化并找最大值
         for (volatile int c = 0; c < nclass; c++) {
-            pvals[c] = ((float)*(pin + base + c) - zi) * si;
-            if (pvals[c] > t0) t0 = pvals[c];
+            float t1 = ((float)(*(pin + base + c)) - (float)zi) * scale_in;
+            *(pvals + c) = t1;
+            if (t1 > t0) t0 = t1;
         }
-        // 第二遍: exp并求和
-        float t1 = 0.0f;  // sum
+        // 第二遍: 计算exp并求和
+        float t2 = 0.0f;  // sum
         for (volatile int c = 0; c < nclass; c++) {
-            pvals[c] = expf(pvals[c] - t0);
-            t1 += pvals[c];
+            float t3 = expf(*(pvals + c) - t0);
+            *(pvals + c) = t3;
+            t2 += t3;
         }
         // 第三遍: 归一化并量化输出
+        if (t2 == 0.0f) t2 = 1e-10f;
         for (volatile int c = 0; c < nclass; c++) {
-            float t2 = pvals[c] / t1;
-            *(pout + base + c) = saturate_int8((int32_t)roundf(t2 / so) + zo);
+            float t4 = *(pvals + c) / t2;
+            int32_t t5 = (int32_t)roundf(t4 / scale_out) + zo;
+            *(pout + base + c) = saturate_int8(t5);
         }
     }
     free(pvals);
@@ -581,62 +641,53 @@ static void op_softmax(const int8_t* pin, int8_t* pout, int nbatch, int nclass,
 
 // ============== 线性操作 ==============
 
-// 全连接层: pout = pin @ pweight^T + pbias
-// 优化: 预先计算每个输出通道的缩放因子数组，避免内层循环浮点除法
+// 全连接层: pout = pin @ pweight^T + pbias (Q16定点, 适配INT26)
+// pscales_q16[o] = (si * pscales[o] / so) * (1<<16) 预计算数组
 // 使用指针算术和手动偏移计算
 static void op_fc(const int8_t* pin, int nbatch, int chn_in, int chn_out,
                   const int8_t* pweight, const int32_t* pbias, int8_t* pout,
-                  float si, int zi, const float* pscales, float so, int zo) {
-    // ===== 预先计算有效缩放因子数组 (在所有循环外) =====
-    float* pscales_eff = (float*)malloc(chn_out * sizeof(float));
-    float t0 = si / so;  // 公共因子
-    for (volatile int o = 0; o < chn_out; o++) {
-        *(pscales_eff + o) = t0 * *(pscales + o);  // 预计算: (si * pscales[o]) / so
-    }
-    HW_BARRIER();  // 确保预计算完成
+                  int zi, const int32_t* pscales_q16, int zo) {
+    // pscales_q16 已经是预计算的Q16定点缩放因子数组
+    HW_BARRIER();
     
-    // ===== 主计算循环 (无浮点除法) =====
+    // ===== 主计算循环 (纯int32_t运算, 适配INT26) =====
     for (volatile int b = 0; b < nbatch; b++) {
-        int in_base = b * chn_in;      // 输入基址偏移
-        int out_base = b * chn_out;    // 输出基址偏移
+        int in_base = b * chn_in;
+        int out_base = b * chn_out;
         for (volatile int o = 0; o < chn_out; o++) {
-            int32_t t1 = 0;  // 累加器
-            int w_base = o * chn_in;   // 权重行基址
+            int32_t t0 = 0;  // 累加器
+            int w_base = o * chn_in;
             // MAC操作: 使用指针算术
             for (volatile int i = 0; i < chn_in; i++) {
-                int32_t t2 = (int32_t)*(pin + in_base + i) - zi;
-                int32_t t3 = (int32_t)*(pweight + w_base + i);
-                t1 += t2 * t3;
+                int32_t t1 = (int32_t)*(pin + in_base + i) - zi;
+                int32_t t2 = (int32_t)*(pweight + w_base + i);
+                t0 += t1 * t2;
             }
             // 加偏置
-            if (pbias) t1 += *(pbias + o);
-            // 量化输出: 使用预计算的缩放因子 (仅乘法，无除法)
-            *(pout + out_base + o) = saturate_int8((int32_t)roundf(t1 * *(pscales_eff + o)) + zo);
+            if (pbias) t0 += *(pbias + o);
+            // Q16量化输出: 分步计算适配INT26
+            // (t0 >> 8) * scale >> 8 = (t0 * scale) >> 16
+            int32_t t3 = ((t0 >> 8) * *(pscales_q16 + o)) >> 8;
+            *(pout + out_base + o) = saturate_int8(t3 + zo);
         }
     }
-    free(pscales_eff);
 }
 
-// 批量矩阵乘法: pout[b] = pin1[b] @ pin2[b]
+// 批量矩阵乘法: pout[b] = pin1[b] @ pin2[b] (Q16定点)
 // 维度: [nbatch, side_m, side_k] @ [nbatch, side_k, side_n] -> [nbatch, side_m, side_n]
-// 优化: 浮点缩放转换为定点乘数+移位，彻底消除内层浮点运算
+// scale = (s1 * s2 / so) * (1<<16) 预计算定点乘数
 static void op_batch_matmul(const int8_t* pin1, const int8_t* pin2, int8_t* pout,
                             int nbatch, int side_m, int side_k, int side_n,
-                            float s1, int z1, float s2, int z2, float so, int zo) {
-    // ===== 预计算: 将浮点缩放转换为定点乘数+移位 =====
-    // 原: t1 * ((s1 * s2) / so)
-    // 优化: (t1 * multiplier) >> shift
-    float t0 = (s1 * s2) / so;  // 有效缩放因子
-    int shift = 15;  // 定点小数位数 (Q15格式)
-    int32_t multiplier = (int32_t)roundf(t0 * (1 << shift));  // 定点乘数
-    HW_BARRIER();  // 确保预计算完成
+                            int32_t scale, int z1, int z2, int zo) {
+    // scale 已经是预计算的Q16定点乘数
+    HW_BARRIER();
     
-    // 预计算 stride (整数计算，无浮点)
-    int stride1_b = side_m * side_k;  // pin1 batch stride
-    int stride2_b = side_k * side_n;  // pin2 batch stride
-    int stride_out = side_m * side_n; // pout batch stride
+    // 预计算 stride (整数计算)
+    int stride1_b = side_m * side_k;
+    int stride2_b = side_k * side_n;
+    int stride_out = side_m * side_n;
     
-    // ===== 主计算循环 (纯整数运算) =====
+    // ===== 主计算循环 (纯int32_t运算) =====
     for (volatile int b = 0; b < nbatch; b++) {
         int base1 = b * stride1_b;
         int base2 = b * stride2_b;
@@ -644,19 +695,16 @@ static void op_batch_matmul(const int8_t* pin1, const int8_t* pin2, int8_t* pout
         
         for (volatile int i = 0; i < side_m; i++) {
             for (volatile int j = 0; j < side_n; j++) {
-                int32_t t1 = 0;  // 累加器
+                int32_t t0 = 0;  // 累加器
                 // 内积计算
                 for (volatile int l = 0; l < side_k; l++) {
-                    // 手动计算偏移: pin1[b,i,l] = pin1[base1 + i*side_k + l]
-                    //               pin2[b,l,j] = pin2[base2 + l*side_n + j]
-                    int32_t t2 = (int32_t)*(pin1 + base1 + i * side_k + l) - z1;
-                    int32_t t3 = (int32_t)*(pin2 + base2 + l * side_n + j) - z2;
-                    t1 += t2 * t3;
+                    int32_t t1 = (int32_t)*(pin1 + base1 + i * side_k + l) - z1;
+                    int32_t t2 = (int32_t)*(pin2 + base2 + l * side_n + j) - z2;
+                    t0 += t1 * t2;
                 }
-                // 定点量化: (t1 * multiplier) >> shift + zo
-                // 使用64位中间结果防止溢出
-                int64_t t4 = ((int64_t)t1 * (int64_t)multiplier) >> shift;
-                *(pout + base_out + i * side_n + j) = saturate_int8((int32_t)t4 + zo);
+                // Q16量化: 分步计算 (t0 >> 8) * scale >> 8
+                int32_t t3 = ((t0 >> 8) * scale) >> 8;
+                *(pout + base_out + i * side_n + j) = saturate_int8(t3 + zo);
             }
         }
     }
@@ -664,38 +712,40 @@ static void op_batch_matmul(const int8_t* pin1, const int8_t* pin2, int8_t* pout
 
 // ============== 归约操作 ==============
 
-// 均值: 沿指定维度求平均
+// 均值: 沿指定维度求平均 (Q16定点)
 // outer: 外层循环次数, reduce_len: 归约长度, inner: 内层循环次数
+// scale = (si / so) * (1<<16) 预计算定点乘数
 static void op_mean(const int8_t* pin, int8_t* pout,
                     int outer, int reduce_len, int inner,
-                    float si, int zi, float so, int zo) {
-    float t0 = si / so;  // 缩放比
-    int reduce_stride = inner;  // 归约维度步长
+                    int32_t scale, int zi, int zo) {
+    int reduce_stride = inner;
     
     for (volatile int o = 0; o < outer; o++) {
         int in_base = o * reduce_len * inner;
         int out_base = o * inner;
         for (volatile int i = 0; i < inner; i++) {
-            int32_t t1 = 0;  // 累加器
+            int32_t t0 = 0;  // 累加器
             // 沿归约维度求和
             for (volatile int r = 0; r < reduce_len; r++) {
-                t1 += *(pin + in_base + r * reduce_stride + i);
+                t0 += *(pin + in_base + r * reduce_stride + i);
             }
-            // 计算均值: 尝试使用位移 (若reduce_len为2的幂)
-            int32_t t2;
-            // 对常见2^n值使用位移
+            // 计算均值: 使用位移 (若reduce_len为2的幂)
+            int32_t t1;
             switch (reduce_len) {
-                case 2:   t2 = t1 >> 1;  break;
-                case 4:   t2 = t1 >> 2;  break;
-                case 8:   t2 = t1 >> 3;  break;
-                case 16:  t2 = t1 >> 4;  break;
-                case 32:  t2 = t1 >> 5;  break;
-                case 64:  t2 = t1 >> 6;  break;
-                case 128: t2 = t1 >> 7;  break;
-                case 256: t2 = t1 >> 8;  break;
-                default:  t2 = t1 / reduce_len;  break;
+                case 2:   t1 = t0 >> 1;  break;
+                case 4:   t1 = t0 >> 2;  break;
+                case 8:   t1 = t0 >> 3;  break;
+                case 16:  t1 = t0 >> 4;  break;
+                case 32:  t1 = t0 >> 5;  break;
+                case 64:  t1 = t0 >> 6;  break;
+                case 128: t1 = t0 >> 7;  break;
+                case 256: t1 = t0 >> 8;  break;
+                default:  t1 = t0 / reduce_len;  break;
             }
-            *(pout + out_base + i) = saturate_int8((int32_t)roundf((t2 - zi) * t0) + zo);
+            // Q16量化输出: ((t1 - zi) * scale) >> 16
+            int32_t t2 = t1 - zi;
+            int32_t t3 = (t2 * scale) >> 16;
+            *(pout + out_base + i) = saturate_int8(t3 + zo);
         }
     }
 }
@@ -964,8 +1014,8 @@ int main(int argc, char* argv[]) {{
         print(f"  生成: ecgformer_model.c")
     
     def _generate_op_code_modular(self, op):
-        """为单个操作生成代码 - Bare-metal Style (模块化版本)
-        使用ptensors指针数组, pscales_t* per-channel scales
+        """为单个操作生成代码 - Q16 Fixed-Point Style (模块化版本)
+        使用ptensors指针数组, 预计算Q16定点scale, 适配INT26中间结果
         """
         op_id = op['id']
         op_type = op['type']
@@ -1007,8 +1057,11 @@ int main(int argc, char* argv[]) {{
         elif op_type == 'ADD':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
+            # Q16: scale1 = (s1/so) * (1<<16), scale2 = (s2/so) * (1<<16)
+            scale1_q16 = int(round((s1 / out_scale) * (1 << 16)))
+            scale2_q16 = int(round((s2 / out_scale) * (1 << 16)))
             code += f'    op_add(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
-            code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'           {scale1_q16}, {z1}, {scale2_q16}, {z2}, {out_zp});\n'
         
         elif op_type == 'SUB':
             s1, z1 = self._get_scale_zp(inputs[0])
@@ -1016,14 +1069,18 @@ int main(int argc, char* argv[]) {{
             if inputs[0] == inputs[1]:
                 code += f'    memset(*(ptensors + {out_tid}), {out_zp}, {out_size});\n'
             else:
+                scale1_q16 = int(round((s1 / out_scale) * (1 << 16)))
+                scale2_q16 = int(round((s2 / out_scale) * (1 << 16)))
                 code += f'    op_sub(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
-                code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
+                code += f'           {scale1_q16}, {z1}, {scale2_q16}, {z2}, {out_zp});\n'
         
         elif op_type == 'MUL':
             s1, z1 = self._get_scale_zp(inputs[0])
             s2, z2 = self._get_scale_zp(inputs[1])
+            # Q16: scale = (s1 * s2 / so) * (1<<16)
+            scale_q16 = int(round((s1 * s2 / out_scale) * (1 << 16)))
             code += f'    op_mul(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
-            code += f'           {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'           {scale_q16}, {z1}, {z2}, {out_zp});\n'
         
         elif op_type == 'SQUARED_DIFFERENCE':
             s1, z1 = self._get_scale_zp(inputs[0])
@@ -1031,11 +1088,15 @@ int main(int argc, char* argv[]) {{
             if inputs[0] == inputs[1]:
                 code += f'    memset(*(ptensors + {out_tid}), {out_zp}, {out_size});\n'
             else:
+                # Q16: scale_diff = (s2/s1) * (1<<16), scale_out = (s1*s1/so) * (1<<16)
+                scale_diff_q16 = int(round((s2 / s1) * (1 << 16)))
+                scale_out_q16 = int(round((s1 * s1 / out_scale) * (1 << 16)))
                 code += f'    op_squared_diff(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
-                code += f'                    {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
+                code += f'                    {scale_diff_q16}, {z1}, {z2}, {scale_out_q16}, {out_zp});\n'
         
         elif op_type == 'RSQRT':
             si, zi = self._get_scale_zp(inputs[0])
+            # rsqrt使用浮点: scale_in = si, scale_out = so
             code += f'    op_rsqrt(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {out_size},\n'
             code += f'             {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
         
@@ -1052,25 +1113,25 @@ int main(int argc, char* argv[]) {{
             has_bias = len(inputs) > 2
             pbias_str = f'(const int32_t*)*(ptensors + {inputs[2]})' if has_bias else 'NULL'
             
-            # 检查是否有per-channel scales
-            weight_info = self.tensors_info.get(weight_tid, {})
-            weight_scales = weight_info.get('scales', np.array([]))
-            
-            if len(weight_scales) > 1:
-                pscales_str = f'pscales_t{weight_tid}'
+            # 检查是否有预计算的 Q16 scales
+            if op_id in self.q16_scales:
+                # 使用预计算的 Q16 scale 数组
+                pscales_str = f'pscales_q16_op{op_id}'
             else:
+                # 单通道 scale: 预计算单个 Q16 值
+                weight_info = self.tensors_info.get(weight_tid, {})
+                weight_scales = weight_info.get('scales', np.array([]))
                 single_scale = weight_scales[0] if len(weight_scales) > 0 else 1.0
-                # 使用malloc分配临时scale数组 (无null检查)
-                code += f'    {{ float* pws = (float*)malloc({chn_out} << 2);\n'
-                code += f'      for(volatile int t0=0; t0<{chn_out}; t0++) *(pws+t0)={single_scale:.10e}f;\n'
-                pscales_str = 'pws'
+                scale_q16 = int(round((si * single_scale / out_scale) * (1 << 16)))
+                code += f'    {{ static const int32_t pws_q16[1] = {{{scale_q16}}};\n'
+                pscales_str = 'pws_q16'
             
             code += f'    op_fc(*(ptensors + {inputs[0]}), {nbatch}, {chn_in}, {chn_out},\n'
             code += f'          (const int8_t*)*(ptensors + {weight_tid}), {pbias_str}, *(ptensors + {out_tid}),\n'
-            code += f'          {si:.10e}f, {zi}, {pscales_str}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'          {zi}, {pscales_str}, {out_zp});\n'
             
-            if len(weight_scales) <= 1:
-                code += '      free(pws); }\n'
+            if op_id not in self.q16_scales:
+                code += '    }\n'
         
         elif op_type == 'CONV_2D':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -1085,23 +1146,23 @@ int main(int argc, char* argv[]) {{
             has_bias = len(inputs) > 2
             pbias_str = f'(const int32_t*)*(ptensors + {inputs[2]})' if has_bias else 'NULL'
             
-            weight_info = self.tensors_info.get(weight_tid, {})
-            weight_scales = weight_info.get('scales', np.array([]))
-            
-            if len(weight_scales) > 1:
-                pscales_str = f'pscales_t{weight_tid}'
+            # 检查是否有预计算的 Q16 scales
+            if op_id in self.q16_scales:
+                pscales_str = f'pscales_q16_op{op_id}'
             else:
+                weight_info = self.tensors_info.get(weight_tid, {})
+                weight_scales = weight_info.get('scales', np.array([]))
                 single_scale = weight_scales[0] if len(weight_scales) > 0 else 1.0
-                code += f'    {{ float* pws = (float*)malloc({chn_out} << 2);\n'
-                code += f'      for(volatile int t0=0; t0<{chn_out}; t0++) *(pws+t0)={single_scale:.10e}f;\n'
-                pscales_str = 'pws'
+                scale_q16 = int(round((si * single_scale / out_scale) * (1 << 16)))
+                code += f'    {{ static const int32_t pws_q16[1] = {{{scale_q16}}};\n'
+                pscales_str = 'pws_q16'
             
             code += f'    op_fc(*(ptensors + {inputs[0]}), {spatial}, {chn_in}, {chn_out},\n'
             code += f'          (const int8_t*)*(ptensors + {weight_tid}), {pbias_str}, *(ptensors + {out_tid}),\n'
-            code += f'          {si:.10e}f, {zi}, {pscales_str}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'          {zi}, {pscales_str}, {out_zp});\n'
             
-            if len(weight_scales) <= 1:
-                code += '      free(pws); }\n'
+            if op_id not in self.q16_scales:
+                code += '    }\n'
         
         elif op_type == 'BATCH_MATMUL':
             in1_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -1114,9 +1175,11 @@ int main(int argc, char* argv[]) {{
             side_k = in1_shape[2] if len(in1_shape) > 2 else in1_shape[1] if len(in1_shape) > 1 else 1
             side_n = in2_shape[2] if len(in2_shape) > 2 else in2_shape[1] if len(in2_shape) > 1 else 1
             
+            # Q16: scale = (s1 * s2 / so) * (1<<16)
+            scale_q16 = int(round((s1 * s2 / out_scale) * (1 << 16)))
             code += f'    op_batch_matmul(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}),\n'
             code += f'                    {nbatch}, {side_m}, {side_k}, {side_n},\n'
-            code += f'                    {s1:.10e}f, {z1}, {s2:.10e}f, {z2}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'                    {scale_q16}, {z1}, {z2}, {out_zp});\n'
         
         elif op_type == 'MEAN':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -1126,9 +1189,11 @@ int main(int argc, char* argv[]) {{
             reduce_len = in_shape[-1] if len(in_shape) > 0 else 1
             inner = 1
             
+            # Q16: scale = (si / so) * (1<<16)
+            scale_q16 = int(round((si / out_scale) * (1 << 16)))
             code += f'    op_mean(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}),\n'
             code += f'            {outer}, {reduce_len}, {inner},\n'
-            code += f'            {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
+            code += f'            {scale_q16}, {zi}, {out_zp});\n'
         
         elif op_type == 'SOFTMAX':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())
@@ -1136,6 +1201,7 @@ int main(int argc, char* argv[]) {{
             nbatch = int(np.prod(in_shape[:-1])) if len(in_shape) > 1 else 1
             nclass = in_shape[-1] if len(in_shape) > 0 else 1
             
+            # softmax使用浮点: scale_in = si, scale_out = so
             code += f'    op_softmax(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {nbatch}, {nclass},\n'
             code += f'               {si:.10e}f, {zi}, {out_scale:.10e}f, {out_zp});\n'
         
@@ -1330,6 +1396,9 @@ static void init_tensors(void) {{
 #define HW_QUANT(out, in, s)  asm volatile(".insn r 0x0b, 0x2, 0x00, %0, %1, %2" : "=r"(out) : "r"(in), "r"(s))
 
 // ============== 操作实现 ==============
+// Q16 定点格式: scale = (int32_t)((1.0 / float_scale) * (1 << 16))
+// 量化公式: out = ((acc * scale) >> 16) + zp
+// 适配INT26中间结果: 使用纯int32_t运算
 
 static inline int8_t saturate_int8(int32_t t0) {
     if (t0 > 127) return 127;
@@ -1337,188 +1406,209 @@ static inline int8_t saturate_int8(int32_t t0) {
     return (int8_t)t0;
 }
 
-static inline int8_t quantize_float(float t0, float scale, int32_t zp) {
-    return saturate_int8((int32_t)roundf(t0 / scale) + zp);
+// Q16 定点量化: out = ((val >> 8) * scale >> 8) + zp (分步避免溢出)
+static inline int8_t quantize_q16(int32_t t0, int32_t scale, int32_t zp) {
+    int32_t t1 = ((t0 >> 8) * scale) >> 8;
+    return saturate_int8(t1 + zp);
 }
 
+// 浮点输入量化 (仅用于外部接口，计算路径使用Q16)
+static inline int8_t quantize_float(float t0, float scale, int32_t zp) {
+    int32_t t1 = (int32_t)roundf(t0 / scale) + zp;
+    return saturate_int8(t1);
+}
+
+// 反量化 (仅用于外部接口/调试)
 static inline float dequantize_int8(int8_t t0, float scale, int32_t zp) {
     return ((float)t0 - (float)zp) * scale;
 }
 
-// 元素级加法: pout[i] = pin1[i] + pin2[i]
+// 元素级加法: pout[i] = pin1[i] + pin2[i] (Q16定点)
+// scale1 = (s1/so) * (1<<16), scale2 = (s2/so) * (1<<16)
 static void op_add(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
-                   float s1, int z1, float s2, int z2, float so, int zo) {
-    float t0 = s1 / so;
-    float t1 = s2 / so;
+                   int32_t scale1, int z1, int32_t scale2, int z2, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t2 = ((float)*(pin1 + i) - z1) * t0 + ((float)*(pin2 + i) - z2) * t1;
-        *(pout + i) = saturate_int8((int32_t)roundf(t2) + zo);
+        int32_t t0 = (int32_t)*(pin1 + i) - z1;
+        int32_t t1 = (int32_t)*(pin2 + i) - z2;
+        int32_t t2 = (t0 * scale1 + t1 * scale2) >> 16;
+        *(pout + i) = saturate_int8(t2 + zo);
     }
 }
 
-// 元素级减法: pout[i] = pin1[i] - pin2[i]
+// 元素级减法: pout[i] = pin1[i] - pin2[i] (Q16定点)
 static void op_sub(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
-                   float s1, int z1, float s2, int z2, float so, int zo) {
-    float t0 = s1 / so;
-    float t1 = s2 / so;
+                   int32_t scale1, int z1, int32_t scale2, int z2, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t2 = ((float)*(pin1 + i) - z1) * t0 - ((float)*(pin2 + i) - z2) * t1;
-        *(pout + i) = saturate_int8((int32_t)roundf(t2) + zo);
+        int32_t t0 = (int32_t)*(pin1 + i) - z1;
+        int32_t t1 = (int32_t)*(pin2 + i) - z2;
+        int32_t t2 = (t0 * scale1 - t1 * scale2) >> 16;
+        *(pout + i) = saturate_int8(t2 + zo);
     }
 }
 
-// 元素级乘法: pout[i] = pin1[i] * pin2[i]
+// 元素级乘法: pout[i] = pin1[i] * pin2[i] (Q16定点)
+// scale = (s1 * s2 / so) * (1<<16)
 static void op_mul(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
-                   float s1, int z1, float s2, int z2, float so, int zo) {
-    float t0 = (s1 * s2) / so;
+                   int32_t scale, int z1, int z2, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t1 = ((float)*(pin1 + i) - z1) * ((float)*(pin2 + i) - z2) * t0;
-        *(pout + i) = saturate_int8((int32_t)roundf(t1) + zo);
+        int32_t t0 = (int32_t)*(pin1 + i) - z1;
+        int32_t t1 = (int32_t)*(pin2 + i) - z2;
+        int32_t t2 = t0 * t1;
+        int32_t t3 = ((t2 >> 8) * scale) >> 8;
+        *(pout + i) = saturate_int8(t3 + zo);
     }
 }
 
-// 平方差: pout[i] = (pin1[i] - pin2[i])^2
+// 平方差: pout[i] = (pin1[i] - pin2[i])^2 (Q16定点)
+// scale_diff = (s2/s1) * (1<<16), scale_out = (s1*s1/so) * (1<<16)
 static void op_squared_diff(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
-                            float s1, int z1, float s2, int z2, float so, int zo) {
-    float t0 = (s1 * s1) / so;
-    float t1 = s2 / s1;
+                            int32_t scale_diff, int z1, int z2, int32_t scale_out, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t2 = ((float)*(pin1 + i) - z1) - ((float)*(pin2 + i) - z2) * t1;
-        float t3 = t2 * t2 * t0;
-        *(pout + i) = saturate_int8((int32_t)roundf(t3) + zo);
+        int32_t t0 = (int32_t)*(pin1 + i) - z1;
+        int32_t t1 = (int32_t)*(pin2 + i) - z2;
+        int32_t t2 = (t1 * scale_diff) >> 16;
+        int32_t t3 = t0 - t2;
+        int32_t t4 = ((t3 * t3) >> 8);
+        int32_t t5 = (t4 * scale_out) >> 8;
+        *(pout + i) = saturate_int8(t5 + zo);
     }
 }
 
 // 倒数平方根: pout[i] = 1/sqrt(pin[i])
+// 使用浮点计算核心, 量化输入/输出
 static void op_rsqrt(const int8_t* pin, int8_t* pout, int len,
-                     float si, int zi, float so, int zo) {
+                     float scale_in, int zi, float scale_out, int zo) {
     for (volatile int i = 0; i < len; i++) {
-        float t0 = ((float)*(pin + i) - zi) * si;
-        float t1 = 1.0f / sqrtf(fmaxf(t0, 1e-12f));
-        *(pout + i) = saturate_int8((int32_t)roundf(t1 / so) + zo);
+        int32_t t0 = (int32_t)*(pin + i) - zi;
+        float t1 = (float)t0 * scale_in;
+        if (t1 <= 0) t1 = 1e-10f;
+        float t2 = 1.0f / sqrtf(t1);
+        int32_t t3 = (int32_t)roundf(t2 / scale_out) + zo;
+        *(pout + i) = saturate_int8(t3);
     }
 }
 
-// 全连接层: pout = pin @ pweight^T + pbias
-// 优化: 预先计算每个输出通道的缩放因子数组，避免内层循环浮点除法
+// 全连接层: pout = pin @ pweight^T + pbias (Q16定点, 适配INT26)
+// pscales_q16[o] = (si * pscales[o] / so) * (1<<16) 预计算数组
 static void op_fc(const int8_t* pin, int nbatch, int chn_in, int chn_out,
                   const int8_t* pweight, const int32_t* pbias, int8_t* pout,
-                  float si, int zi, const float* pscales, float so, int zo) {
-    // ===== 预先计算有效缩放因子数组 (在所有循环外) =====
-    float* pscales_eff = (float*)malloc(chn_out * sizeof(float));
-    float t0 = si / so;  // 公共因子
-    for (volatile int o = 0; o < chn_out; o++) {
-        *(pscales_eff + o) = t0 * *(pscales + o);  // 预计算: (si * pscales[o]) / so
-    }
-    HW_BARRIER();  // 确保预计算完成
+                  int zi, const int32_t* pscales_q16, int zo) {
+    HW_BARRIER();
     
-    // ===== 主计算循环 (无浮点除法) =====
+    // ===== 主计算循环 (纯int32_t运算) =====
     for (volatile int b = 0; b < nbatch; b++) {
         int in_base = b * chn_in;
         int out_base = b * chn_out;
         for (volatile int o = 0; o < chn_out; o++) {
-            int32_t t1 = 0;  // 累加器
+            int32_t t0 = 0;  // 累加器
             int w_base = o * chn_in;
             for (volatile int i = 0; i < chn_in; i++) {
-                int32_t t2 = (int32_t)*(pin + in_base + i) - zi;
-                int32_t t3 = (int32_t)*(pweight + w_base + i);
-                t1 += t2 * t3;
+                int32_t t1 = (int32_t)*(pin + in_base + i) - zi;
+                int32_t t2 = (int32_t)*(pweight + w_base + i);
+                t0 += t1 * t2;
             }
-            if (pbias) t1 += *(pbias + o);
-            // 量化输出: 使用预计算的缩放因子 (仅乘法，无除法)
-            *(pout + out_base + o) = saturate_int8((int32_t)roundf(t1 * *(pscales_eff + o)) + zo);
+            if (pbias) t0 += *(pbias + o);
+            // Q16量化输出: (t0 >> 8) * scale >> 8, 分步避免溢出
+            int32_t t3 = ((t0 >> 8) * *(pscales_q16 + o)) >> 8;
+            *(pout + out_base + o) = saturate_int8(t3 + zo);
         }
     }
-    free(pscales_eff);
 }
 
-// 批量矩阵乘法: pout[b] = pin1[b] @ pin2[b]
-// 优化: 浮点缩放转换为定点乘数+移位，彻底消除内层浮点运算
+// 批量矩阵乘法: pout[b] = pin1[b] @ pin2[b] (Q16定点)
+// scale = (s1 * s2 / so) * (1<<16) 预计算定点乘数
 static void op_batch_matmul(const int8_t* pin1, const int8_t* pin2, int8_t* pout,
                             int nbatch, int side_m, int side_k, int side_n,
-                            float s1, int z1, float s2, int z2, float so, int zo) {
-    // ===== 预计算: 将浮点缩放转换为定点乘数+移位 =====
-    float t0 = (s1 * s2) / so;  // 有效缩放因子
-    int shift = 15;  // 定点小数位数 (Q15格式)
-    int32_t multiplier = (int32_t)roundf(t0 * (1 << shift));  // 定点乘数
-    HW_BARRIER();  // 确保预计算完成
+                            int32_t scale, int z1, int z2, int zo) {
+    HW_BARRIER();
     
-    // 预计算 stride (整数计算，无浮点)
+    // 预计算 stride (整数计算)
     int stride1_b = side_m * side_k;
     int stride2_b = side_k * side_n;
     int stride_out = side_m * side_n;
     
-    // ===== 主计算循环 (纯整数运算) =====
+    // ===== 主计算循环 (纯int32_t运算) =====
     for (volatile int b = 0; b < nbatch; b++) {
         int base1 = b * stride1_b;
         int base2 = b * stride2_b;
         int base_out = b * stride_out;
         for (volatile int i = 0; i < side_m; i++) {
             for (volatile int j = 0; j < side_n; j++) {
-                int32_t t1 = 0;
+                int32_t t0 = 0;
                 for (volatile int l = 0; l < side_k; l++) {
-                    int32_t t2 = (int32_t)*(pin1 + base1 + i * side_k + l) - z1;
-                    int32_t t3 = (int32_t)*(pin2 + base2 + l * side_n + j) - z2;
-                    t1 += t2 * t3;
+                    int32_t t1 = (int32_t)*(pin1 + base1 + i * side_k + l) - z1;
+                    int32_t t2 = (int32_t)*(pin2 + base2 + l * side_n + j) - z2;
+                    t0 += t1 * t2;
                 }
-                // 定点量化: (t1 * multiplier) >> shift + zo
-                int64_t t4 = ((int64_t)t1 * (int64_t)multiplier) >> shift;
-                *(pout + base_out + i * side_n + j) = saturate_int8((int32_t)t4 + zo);
+                // Q16量化: (t0 >> 8) * scale >> 8
+                int32_t t3 = ((t0 >> 8) * scale) >> 8;
+                *(pout + base_out + i * side_n + j) = saturate_int8(t3 + zo);
             }
         }
     }
 }
 
-// 均值: 沿指定维度求平均
+// 均值: 沿指定维度求平均 (Q16定点)
+// scale = (si / so) * (1<<16) 预计算定点乘数
 static void op_mean(const int8_t* pin, int8_t* pout,
                     int outer, int reduce_len, int inner,
-                    float si, int zi, float so, int zo) {
-    float t0 = si / so;
+                    int32_t scale, int zi, int zo) {
     for (volatile int o = 0; o < outer; o++) {
         int in_base = o * reduce_len * inner;
         int out_base = o * inner;
         for (volatile int i = 0; i < inner; i++) {
-            int32_t t1 = 0;
+            int32_t t0 = 0;
             for (volatile int r = 0; r < reduce_len; r++) {
-                t1 += *(pin + in_base + r * inner + i);
+                t0 += *(pin + in_base + r * inner + i);
             }
             // 使用位移替代常见2^n除法
-            int32_t t2;
+            int32_t t1;
             switch (reduce_len) {
-                case 2:   t2 = t1 >> 1;  break;
-                case 4:   t2 = t1 >> 2;  break;
-                case 8:   t2 = t1 >> 3;  break;
-                case 16:  t2 = t1 >> 4;  break;
-                case 32:  t2 = t1 >> 5;  break;
-                case 64:  t2 = t1 >> 6;  break;
-                case 128: t2 = t1 >> 7;  break;
-                case 256: t2 = t1 >> 8;  break;
-                default:  t2 = t1 / reduce_len;  break;
+                case 2:   t1 = t0 >> 1;  break;
+                case 4:   t1 = t0 >> 2;  break;
+                case 8:   t1 = t0 >> 3;  break;
+                case 16:  t1 = t0 >> 4;  break;
+                case 32:  t1 = t0 >> 5;  break;
+                case 64:  t1 = t0 >> 6;  break;
+                case 128: t1 = t0 >> 7;  break;
+                case 256: t1 = t0 >> 8;  break;
+                default:  t1 = t0 / reduce_len;  break;
             }
-            *(pout + out_base + i) = saturate_int8((int32_t)roundf((t2 - zi) * t0) + zo);
+            // Q16量化输出
+            int32_t t2 = t1 - zi;
+            int32_t t3 = (t2 * scale) >> 16;
+            *(pout + out_base + i) = saturate_int8(t3 + zo);
         }
     }
 }
 
 // Softmax: 沿最后一个维度
+// 使用浮点计算核心, 量化输入/输出
 static void op_softmax(const int8_t* pin, int8_t* pout, int nbatch, int nclass,
-                       float si, int zi, float so, int zo) {
-    float* pvals = (float*)malloc(nclass << 2);  // nclass * 4 bytes
+                       float scale_in, int zi, float scale_out, int zo) {
+    float* pvals = (float*)malloc(nclass * sizeof(float));
     for (volatile int b = 0; b < nbatch; b++) {
         int base = b * nclass;
-        float t0 = -1e9f;
+        float t0 = -1e9f;  // max_val
+        // 第一遍: 反量化并找最大值
         for (volatile int c = 0; c < nclass; c++) {
-            *(pvals + c) = ((float)*(pin + base + c) - zi) * si;
-            if (*(pvals + c) > t0) t0 = *(pvals + c);
+            float t1 = ((float)(*(pin + base + c)) - (float)zi) * scale_in;
+            *(pvals + c) = t1;
+            if (t1 > t0) t0 = t1;
         }
-        float t1 = 0.0f;
+        // 第二遍: 计算exp并求和
+        float t2 = 0.0f;
         for (volatile int c = 0; c < nclass; c++) {
-            *(pvals + c) = expf(*(pvals + c) - t0);
-            t1 += *(pvals + c);
+            float t3 = expf(*(pvals + c) - t0);
+            *(pvals + c) = t3;
+            t2 += t3;
         }
+        // 第三遍: 归一化并量化输出
+        if (t2 == 0.0f) t2 = 1e-10f;
         for (volatile int c = 0; c < nclass; c++) {
-            float t2 = *(pvals + c) / t1;
-            *(pout + base + c) = saturate_int8((int32_t)roundf(t2 / so) + zo);
+            float t4 = *(pvals + c) / t2;
+            int32_t t5 = (int32_t)roundf(t4 / scale_out) + zo;
+            *(pout + base + c) = saturate_int8(t5);
         }
     }
     free(pvals);
