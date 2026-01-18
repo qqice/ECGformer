@@ -31,12 +31,11 @@ try:
 except ImportError:
     print("警告: TensorFlow未安装，无法运行TFLite模型")
     tf = None
-
 from integer_only_model import IntegerOnlyECGformer
 
 # C实现
 try:
-    from verify_c_impl import ECGformerC, compile_c_library
+    from verify_c_impl import ECGformerC, compile_c_library, print_c_implementation_metrics
     HAS_C_IMPL = True
 except Exception as e:
     print(f"警告: C实现未就绪 - {e}")
@@ -391,7 +390,19 @@ def main():
     parser.add_argument('--method', '-m', nargs='+', choices=['tflite', 'numpy', 'c'],
                         default=['tflite', 'c'],
                         help='选择要评估的实现方法 (默认: tflite, c)')
+    parser.add_argument('--metrics', action='store_true',
+                        help='显示C实现的硬件相关指标')
+    parser.add_argument('--metrics-only', action='store_true',
+                        help='仅显示C实现的硬件相关指标，不运行评估')
     args = parser.parse_args()
+    
+    # 仅显示指标模式
+    if args.metrics_only:
+        if HAS_C_IMPL:
+            print_c_implementation_metrics()
+        else:
+            print("错误: C实现不可用，无法显示指标")
+        return
     
     # 默认启用并行，除非指定--no-parallel
     args.parallel = not args.no_parallel
@@ -494,6 +505,10 @@ def main():
     
     # 对比结果
     compare_implementations(results, y_test)
+    
+    # 如果包含C实现且指定了--metrics，打印硬件指标
+    if HAS_C_IMPL and (args.metrics or 'c' in args.method):
+        print_c_implementation_metrics()
     
     # 保存结果
     output_file = os.path.join(PROJECT_ROOT, 'results', 'accuracy_comparison.txt')
