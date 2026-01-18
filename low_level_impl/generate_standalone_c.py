@@ -253,12 +253,51 @@ class ECGformerCGenerator:
         slots = []
         slot_assignments = {}
         
+        # 零拷贝优化: 追踪哪些张量可以别名到其他张量
+        # 格式: {output_tid: input_tid} 表示 output_tid 直接使用 input_tid 的内存
+        self.zero_copy_aliases = {}
+        
+        # 更安全的零拷贝策略：让输出使用与输入相同的槽位
+        # 这样 op_copy 会检测到 pin == pout 并跳过拷贝
+        self.same_slot_pairs = {}  # {output_tid: input_tid}
+        
+        # 识别可以共享槽位的 reshape/expand_dims 操作
+        for op in self.ops:
+            op_type = op['type']
+            if op_type in ('RESHAPE', 'EXPAND_DIMS'):
+                input_tid = op['inputs'][0]
+                output_tid = op['outputs'][0]
+                
+                # 检查输入和输出大小是否相同
+                in_size = self.tensors_info.get(input_tid, {}).get('size', 0)
+                out_size = self.tensors_info.get(output_tid, {}).get('size', 0)
+                
+                if in_size == out_size and in_size > 0:
+                    # 检查输入张量是否在该操作后仍被使用
+                    input_lifetime = self.tensor_lifetime.get(input_tid, (0, 0))
+                    op_id = op['id']
+                    
+                    # 如果输入的最后使用就是当前操作，可以让输出共享槽位
+                    if input_lifetime[1] == op_id:
+                        self.same_slot_pairs[output_tid] = input_tid
+        
+        print(f"  零拷贝优化: 识别到 {len(self.same_slot_pairs)} 个可共享槽位的操作")
+        
+        # 第一遍：分配所有非共享槽位的张量
         for tid in sorted_tensors:
             if tid not in self.tensors_info:
                 continue
             
             # 跳过融合注意力块的中间张量
             if tid in self.attention_tensors:
+                continue
+            
+            # 如果该张量是零拷贝别名的目标，则跳过（稍后处理）
+            if tid in self.zero_copy_aliases:
+                continue
+            
+            # 跳过可共享槽位的张量（稍后处理）
+            if tid in self.same_slot_pairs:
                 continue
                 
             size = self.tensors_info[tid]['size']
@@ -284,6 +323,46 @@ class ECGformerCGenerator:
             else:
                 slot_assignments[tid] = len(slots)
                 slots.append({'size': size, 'end_time': end_time})
+        
+        # 第二遍：处理可共享槽位的张量
+        # 按照依赖顺序处理，确保源张量已经被分配
+        processed = set()
+        changed = True
+        while changed:
+            changed = False
+            for tid in sorted_tensors:
+                if tid in processed or tid not in self.same_slot_pairs:
+                    continue
+                    
+                source_tid = self.same_slot_pairs[tid]
+                # 递归查找最终源
+                while source_tid in self.same_slot_pairs:
+                    source_tid = self.same_slot_pairs[source_tid]
+                
+                if source_tid in slot_assignments:
+                    slot_assignments[tid] = slot_assignments[source_tid]
+                    # 延长槽位的使用时间
+                    slot_idx = slot_assignments[tid]
+                    end_time = self.tensor_lifetime.get(tid, (0, 0))[1]
+                    if slots[slot_idx]['end_time'] < end_time:
+                        slots[slot_idx]['end_time'] = end_time
+                    processed.add(tid)
+                    changed = True
+        
+        # 第三遍：处理零拷贝别名（如果有）
+        for tid in self.zero_copy_aliases:
+            if tid in slot_assignments:
+                continue
+            source_tid = self.zero_copy_aliases[tid]
+            while source_tid in self.zero_copy_aliases:
+                source_tid = self.zero_copy_aliases[source_tid]
+            
+            if source_tid in slot_assignments:
+                slot_assignments[tid] = slot_assignments[source_tid]
+                slot_idx = slot_assignments[tid]
+                end_time = self.tensor_lifetime.get(tid, (0, 0))[1]
+                if slots[slot_idx]['end_time'] < end_time:
+                    slots[slot_idx]['end_time'] = end_time
         
         slot_sizes = [s['size'] for s in slots]
         peak_memory = sum(slot_sizes)
@@ -1837,27 +1916,49 @@ int main(int argc, char* argv[]) {{
             # 如果不是起始操作，跳过（已在融合代码中处理）
             return f'    // Op#{op_id}: {op_type} (fused in attention block)\n'
         
+        # 检查是否是零拷贝操作
+        zero_copy_aliases = getattr(self, 'zero_copy_aliases', {})
+        is_zero_copy = out_tid in zero_copy_aliases
+        
         # 根据内存模式设置输出张量指针
         if memory_mode == 'pingpong':
             # pingpong模式使用slot分配 (与reuse模式相同的分配方式)
-            if hasattr(self, 'slot_assignments') and out_tid in self.slot_assignments:
+            if is_zero_copy:
+                # 零拷贝: 输出直接使用输入的内存地址
+                source_tid = zero_copy_aliases[out_tid]
+                # 递归查找最终源
+                while source_tid in zero_copy_aliases:
+                    source_tid = zero_copy_aliases[source_tid]
+                code += f'    *(ptensors + {out_tid}) = *(ptensors + {source_tid});  // zero-copy alias\n'
+            elif hasattr(self, 'slot_assignments') and out_tid in self.slot_assignments:
                 slot_idx = self.slot_assignments[out_tid]
                 code += f'    *(ptensors + {out_tid}) = g_activation_pool + g_slot_offsets[{slot_idx}];\n'
             elif out_tid not in getattr(self, 'attention_tensors', set()):
                 # 跳过中间注意力张量（不需要分配）
                 code += f'    // Warning: tensor {out_tid} not assigned to slot\n'
         elif memory_mode == 'reuse' and hasattr(self, 'slot_assignments'):
-            if out_tid in self.slot_assignments:
+            if is_zero_copy:
+                source_tid = zero_copy_aliases[out_tid]
+                while source_tid in zero_copy_aliases:
+                    source_tid = zero_copy_aliases[source_tid]
+                code += f'    *(ptensors + {out_tid}) = *(ptensors + {source_tid});  // zero-copy alias\n'
+            elif out_tid in self.slot_assignments:
                 slot_idx = self.slot_assignments[out_tid]
                 code += f'    *(ptensors + {out_tid}) = g_activation_pool + g_slot_offsets[{slot_idx}];\n'
         
         if op_type == 'RESHAPE':
-            in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
-            code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {in_size});\n'
+            if is_zero_copy:
+                code += f'    // zero-copy: skip memcpy for RESHAPE\n'
+            else:
+                in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
+                code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {in_size});\n'
         
         elif op_type == 'EXPAND_DIMS':
-            in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
-            code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {in_size});\n'
+            if is_zero_copy:
+                code += f'    // zero-copy: skip memcpy for EXPAND_DIMS\n'
+            else:
+                in_size = self.tensors_info.get(inputs[0], {}).get('size', 1)
+                code += f'    op_copy(*(ptensors + {inputs[0]}), *(ptensors + {out_tid}), {in_size});\n'
         
         elif op_type == 'TRANSPOSE':
             in_shape = self.tensors_info.get(inputs[0], {}).get('shape', ())

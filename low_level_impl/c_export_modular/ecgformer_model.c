@@ -165,7 +165,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op5, -1);
 
     // Op#6: RESHAPE
-    *(ptensors + 88) = g_activation_pool + g_slot_offsets[3];
+    *(ptensors + 88) = g_activation_pool + g_slot_offsets[1];
     op_copy(*(ptensors + 87), *(ptensors + 88), 23936);
 
     // Op#7: ADD
@@ -184,7 +184,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op9, 0);
 
     // Op#10: RESHAPE
-    *(ptensors + 92) = g_activation_pool + g_slot_offsets[4];
+    *(ptensors + 92) = g_activation_pool + g_slot_offsets[1];
     op_copy(*(ptensors + 91), *(ptensors + 92), 23936);
 
     // Op#11: ADD
@@ -209,7 +209,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op17, 2);
 
     // Op#18: RESHAPE
-    *(ptensors + 100) = g_activation_pool + g_slot_offsets[3];
+    *(ptensors + 100) = g_activation_pool + g_slot_offsets[1];
     op_copy(*(ptensors + 99), *(ptensors + 100), 23936);
 
     // Op#19: ADD
@@ -242,7 +242,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_transpose_4d(*(ptensors + 103), *(ptensors + 104), 1, 8, 187, 16, 0, 2, 1, 3);
 
     // Op#23: RESHAPE
-    *(ptensors + 105) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 105) = g_activation_pool + g_slot_offsets[3];
     op_copy(*(ptensors + 104), *(ptensors + 105), 23936);
 
     // Op#24: FULLY_CONNECTED
@@ -282,11 +282,11 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
            8127, 0, -128, 0);
 
     // Op#31: EXPAND_DIMS
-    *(ptensors + 113) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 113) = g_activation_pool + g_slot_offsets[2];
     op_copy(*(ptensors + 112), *(ptensors + 113), 187);
 
     // Op#32: CONV_2D
-    *(ptensors + 114) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 114) = g_activation_pool + g_slot_offsets[0];
     op_fc(*(ptensors + 113), 187, 1, 4,
           (const int8_t*)*(ptensors + 68), (const int32_t*)*(ptensors + 64), *(ptensors + 114),
           0, pscales_q16_op32, 0);
@@ -296,11 +296,11 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 114), *(ptensors + 115), 748);
 
     // Op#34: EXPAND_DIMS
-    *(ptensors + 116) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 116) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 115), *(ptensors + 116), 748);
 
     // Op#35: CONV_2D
-    *(ptensors + 117) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 117) = g_activation_pool + g_slot_offsets[2];
     { static const int32_t pws_q16[1] = {559};
     op_fc(*(ptensors + 116), 187, 4, 1,
           (const int8_t*)*(ptensors + 63), (const int32_t*)*(ptensors + 59), *(ptensors + 117),
@@ -312,17 +312,17 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 117), *(ptensors + 118), 187);
 
     // Op#37: ADD
-    *(ptensors + 119) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 119) = g_activation_pool + g_slot_offsets[2];
     op_add(*(ptensors + 118), *(ptensors + 58), *(ptensors + 119), 187,
            0, 0, 636, -128, 20);
 
     // Op#38: ADD
-    *(ptensors + 120) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 120) = g_activation_pool + g_slot_offsets[0];
     op_add(*(ptensors + 119), *(ptensors + 107), *(ptensors + 120), 187,
            65536, 20, 65536, 22, 20);
 
     // Op#39: SQUARED_DIFFERENCE
-    *(ptensors + 121) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 121) = g_activation_pool + g_slot_offsets[2];
     memset(*(ptensors + 121), -128, 187);
 
     // Op#40: ADD
@@ -331,7 +331,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
            65536, -128, 65536, -128, -128);
 
     // Op#41: SUB
-    *(ptensors + 123) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 123) = g_activation_pool + g_slot_offsets[2];
     memset(*(ptensors + 123), 0, 187);
 
     // Op#42: RSQRT
@@ -351,7 +351,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op44, -1);
 
     // Op#45: RESHAPE
-    *(ptensors + 127) = g_activation_pool + g_slot_offsets[4];
+    *(ptensors + 127) = g_activation_pool + g_slot_offsets[3];
     op_copy(*(ptensors + 126), *(ptensors + 127), 23936);
 
     // Op#46: ADD
@@ -370,7 +370,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op48, 1);
 
     // Op#49: RESHAPE
-    *(ptensors + 131) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 131) = g_activation_pool + g_slot_offsets[3];
     op_copy(*(ptensors + 130), *(ptensors + 131), 23936);
 
     // Op#50: ADD
@@ -379,7 +379,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
            65694, 1, 497, -6, 1);
 
     // Op#51: MUL
-    *(ptensors + 133) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 133) = g_activation_pool + g_slot_offsets[2];
     op_mul(*(ptensors + 132), *(ptensors + 74), *(ptensors + 133), 23936,
            257, 1, -128, 1);
 
@@ -389,28 +389,28 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // ===== V 准备操作 (提前执行) =====
     // Op#56: FULLY_CONNECTED
-    *(ptensors + 138) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 138) = g_activation_pool + g_slot_offsets[2];
     op_fc(*(ptensors + 125), 187, 1, 128,
           (const int8_t*)*(ptensors + 51), (const int32_t*)*(ptensors + 50), *(ptensors + 138),
           0, pscales_q16_op56, 0);
 
     // Op#57: RESHAPE
-    *(ptensors + 139) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 139) = g_activation_pool + g_slot_offsets[2];
     op_copy(*(ptensors + 138), *(ptensors + 139), 23936);
 
     // Op#58: ADD
-    *(ptensors + 140) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 140) = g_activation_pool + g_slot_offsets[1];
     op_add(*(ptensors + 139), *(ptensors + 49), *(ptensors + 140), 23936,
            33911, 0, 85324, -6, 6);
 
     // Op#59: TRANSPOSE
-    *(ptensors + 141) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 141) = g_activation_pool + g_slot_offsets[2];
     op_transpose_4d(*(ptensors + 140), *(ptensors + 141), 1, 187, 8, 16, 0, 2, 1, 3);
 
     // ========== 融合注意力块 (Ops #53-#60) ==========
     // 策略: 逐Head计算，避免存储完整的 (8, 187, 187) 注意力矩阵
     // 每个Head只需 ~34969 bytes 临时空间
-    *(ptensors + 142) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 142) = g_activation_pool + g_slot_offsets[1];
 
     op_fused_attention_per_head(
         *(ptensors + 129),   // Q: (1, 8, 187, 16)
@@ -424,11 +424,11 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     );
     
     // Op#61: TRANSPOSE
-    *(ptensors + 143) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 143) = g_activation_pool + g_slot_offsets[2];
     op_transpose_4d(*(ptensors + 142), *(ptensors + 143), 1, 8, 187, 16, 0, 2, 1, 3);
 
     // Op#62: RESHAPE
-    *(ptensors + 144) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 144) = g_activation_pool + g_slot_offsets[2];
     op_copy(*(ptensors + 143), *(ptensors + 144), 23936);
 
     // Op#63: FULLY_CONNECTED
@@ -440,12 +440,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     }
 
     // Op#64: ADD
-    *(ptensors + 146) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 146) = g_activation_pool + g_slot_offsets[2];
     op_add(*(ptensors + 145), *(ptensors + 120), *(ptensors + 146), 187,
            65536, 20, 65536, 20, 20);
 
     // Op#65: SQUARED_DIFFERENCE
-    *(ptensors + 147) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 147) = g_activation_pool + g_slot_offsets[0];
     memset(*(ptensors + 147), -128, 187);
 
     // Op#66: ADD
@@ -454,7 +454,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
            65536, -128, 65536, -128, -128);
 
     // Op#67: SUB
-    *(ptensors + 149) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 149) = g_activation_pool + g_slot_offsets[0];
     memset(*(ptensors + 149), 0, 187);
 
     // Op#68: RSQRT
@@ -468,25 +468,25 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
            8127, 0, -128, 0);
 
     // Op#70: EXPAND_DIMS
-    *(ptensors + 152) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 152) = g_activation_pool + g_slot_offsets[1];
     op_copy(*(ptensors + 151), *(ptensors + 152), 187);
 
     // Op#71: CONV_2D
-    *(ptensors + 153) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 153) = g_activation_pool + g_slot_offsets[0];
     op_fc(*(ptensors + 152), 187, 1, 4,
           (const int8_t*)*(ptensors + 46), (const int32_t*)*(ptensors + 65), *(ptensors + 153),
           0, pscales_q16_op71, 0);
 
     // Op#72: RESHAPE
-    *(ptensors + 154) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 154) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 153), *(ptensors + 154), 748);
 
     // Op#73: EXPAND_DIMS
-    *(ptensors + 155) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 155) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 154), *(ptensors + 155), 748);
 
     // Op#74: CONV_2D
-    *(ptensors + 156) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 156) = g_activation_pool + g_slot_offsets[0];
     { static const int32_t pws_q16[1] = {289};
     op_fc(*(ptensors + 155), 187, 4, 1,
           (const int8_t*)*(ptensors + 45), (const int32_t*)*(ptensors + 60), *(ptensors + 156),
@@ -494,11 +494,11 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     }
 
     // Op#75: RESHAPE
-    *(ptensors + 157) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 157) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 156), *(ptensors + 157), 187);
 
     // Op#76: ADD
-    *(ptensors + 158) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 158) = g_activation_pool + g_slot_offsets[0];
     op_add(*(ptensors + 157), *(ptensors + 44), *(ptensors + 158), 187,
            0, 0, 636, -128, 17);
 
@@ -508,16 +508,16 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
            65536, 17, 65536, 20, 17);
 
     // Op#78: SQUARED_DIFFERENCE
-    *(ptensors + 160) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 160) = g_activation_pool + g_slot_offsets[0];
     memset(*(ptensors + 160), -128, 187);
 
     // Op#79: ADD
-    *(ptensors + 161) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 161) = g_activation_pool + g_slot_offsets[2];
     op_add(*(ptensors + 160), *(ptensors + 81), *(ptensors + 161), 187,
            65536, -128, 65536, -128, -128);
 
     // Op#80: SUB
-    *(ptensors + 162) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 162) = g_activation_pool + g_slot_offsets[0];
     memset(*(ptensors + 162), 0, 187);
 
     // Op#81: RSQRT
@@ -526,7 +526,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
              3.9215688048e-06f, -128, 1.2401087582e-01f, -128);
 
     // Op#82: MUL
-    *(ptensors + 164) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 164) = g_activation_pool + g_slot_offsets[2];
     op_mul(*(ptensors + 162), *(ptensors + 163), *(ptensors + 164), 187,
            8127, 0, -128, 0);
 
@@ -537,7 +537,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op83, -1);
 
     // Op#84: RESHAPE
-    *(ptensors + 166) = g_activation_pool + g_slot_offsets[4];
+    *(ptensors + 166) = g_activation_pool + g_slot_offsets[3];
     op_copy(*(ptensors + 165), *(ptensors + 166), 23936);
 
     // Op#85: ADD
@@ -556,7 +556,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op87, -2);
 
     // Op#88: RESHAPE
-    *(ptensors + 170) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 170) = g_activation_pool + g_slot_offsets[3];
     op_copy(*(ptensors + 169), *(ptensors + 170), 23936);
 
     // Op#89: ADD
@@ -565,7 +565,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
            65534, -2, 635, -1, -2);
 
     // Op#90: MUL
-    *(ptensors + 172) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 172) = g_activation_pool + g_slot_offsets[0];
     op_mul(*(ptensors + 171), *(ptensors + 74), *(ptensors + 172), 23936,
            257, -2, -128, -2);
 
@@ -575,7 +575,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // ===== V 准备操作 (提前执行) =====
     // Op#95: FULLY_CONNECTED
-    *(ptensors + 177) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 177) = g_activation_pool + g_slot_offsets[0];
     op_fc(*(ptensors + 164), 187, 1, 128,
           (const int8_t*)*(ptensors + 37), (const int32_t*)*(ptensors + 36), *(ptensors + 177),
           0, pscales_q16_op95, -2);
@@ -585,18 +585,18 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 177), *(ptensors + 178), 23936);
 
     // Op#97: ADD
-    *(ptensors + 179) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 179) = g_activation_pool + g_slot_offsets[0];
     op_add(*(ptensors + 178), *(ptensors + 35), *(ptensors + 179), 23936,
            13318, -2, 62684, -8, 0);
 
     // Op#98: TRANSPOSE
-    *(ptensors + 180) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 180) = g_activation_pool + g_slot_offsets[2];
     op_transpose_4d(*(ptensors + 179), *(ptensors + 180), 1, 187, 8, 16, 0, 2, 1, 3);
 
     // ========== 融合注意力块 (Ops #92-#99) ==========
     // 策略: 逐Head计算，避免存储完整的 (8, 187, 187) 注意力矩阵
     // 每个Head只需 ~34969 bytes 临时空间
-    *(ptensors + 181) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 181) = g_activation_pool + g_slot_offsets[0];
 
     op_fused_attention_per_head(
         *(ptensors + 168),   // Q: (1, 8, 187, 16)
@@ -610,7 +610,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     );
     
     // Op#100: TRANSPOSE
-    *(ptensors + 182) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 182) = g_activation_pool + g_slot_offsets[2];
     op_transpose_4d(*(ptensors + 181), *(ptensors + 182), 1, 8, 187, 16, 0, 2, 1, 3);
 
     // Op#101: RESHAPE
@@ -654,11 +654,11 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
            8127, 0, -128, 0);
 
     // Op#109: EXPAND_DIMS
-    *(ptensors + 191) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 191) = g_activation_pool + g_slot_offsets[1];
     op_copy(*(ptensors + 190), *(ptensors + 191), 187);
 
     // Op#110: CONV_2D
-    *(ptensors + 192) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 192) = g_activation_pool + g_slot_offsets[0];
     op_fc(*(ptensors + 191), 187, 1, 4,
           (const int8_t*)*(ptensors + 32), (const int32_t*)*(ptensors + 66), *(ptensors + 192),
           0, pscales_q16_op110, 0);
@@ -668,7 +668,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 192), *(ptensors + 193), 748);
 
     // Op#112: EXPAND_DIMS
-    *(ptensors + 194) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 194) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 193), *(ptensors + 194), 748);
 
     // Op#113: CONV_2D
@@ -680,7 +680,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     }
 
     // Op#114: RESHAPE
-    *(ptensors + 196) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 196) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 195), *(ptensors + 196), 187);
 
     // Op#115: ADD
@@ -723,7 +723,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op122, -2);
 
     // Op#123: RESHAPE
-    *(ptensors + 205) = g_activation_pool + g_slot_offsets[3];
+    *(ptensors + 205) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 204), *(ptensors + 205), 23936);
 
     // Op#124: ADD
@@ -742,7 +742,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op126, -1);
 
     // Op#127: RESHAPE
-    *(ptensors + 209) = g_activation_pool + g_slot_offsets[4];
+    *(ptensors + 209) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 208), *(ptensors + 209), 23936);
 
     // Op#128: ADD
@@ -767,7 +767,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
           0, pscales_q16_op134, -7);
 
     // Op#135: RESHAPE
-    *(ptensors + 217) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 217) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 216), *(ptensors + 217), 23936);
 
     // Op#136: ADD
@@ -800,11 +800,11 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_transpose_4d(*(ptensors + 220), *(ptensors + 221), 1, 8, 187, 16, 0, 2, 1, 3);
 
     // Op#140: RESHAPE
-    *(ptensors + 222) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 222) = g_activation_pool + g_slot_offsets[2];
     op_copy(*(ptensors + 221), *(ptensors + 222), 23936);
 
     // Op#141: FULLY_CONNECTED
-    *(ptensors + 223) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 223) = g_activation_pool + g_slot_offsets[0];
     { static const int32_t pws_q16[1] = {0};
     op_fc(*(ptensors + 222), 187, 128, 1,
           (const int8_t*)*(ptensors + 20), (const int32_t*)*(ptensors + 19), *(ptensors + 223),
@@ -812,21 +812,21 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     }
 
     // Op#142: ADD
-    *(ptensors + 224) = g_activation_pool + g_slot_offsets[0];
+    *(ptensors + 224) = g_activation_pool + g_slot_offsets[2];
     op_add(*(ptensors + 223), *(ptensors + 198), *(ptensors + 224), 187,
            65536, 15, 65536, 15, 15);
 
     // Op#143: SQUARED_DIFFERENCE
-    *(ptensors + 225) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 225) = g_activation_pool + g_slot_offsets[0];
     memset(*(ptensors + 225), -128, 187);
 
     // Op#144: ADD
-    *(ptensors + 226) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 226) = g_activation_pool + g_slot_offsets[1];
     op_add(*(ptensors + 225), *(ptensors + 81), *(ptensors + 226), 187,
            65536, -128, 65536, -128, -128);
 
     // Op#145: SUB
-    *(ptensors + 227) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 227) = g_activation_pool + g_slot_offsets[0];
     memset(*(ptensors + 227), 0, 187);
 
     // Op#146: RSQRT
@@ -835,7 +835,7 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
              3.9215688048e-06f, -128, 1.2401087582e-01f, -128);
 
     // Op#147: MUL
-    *(ptensors + 229) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 229) = g_activation_pool + g_slot_offsets[1];
     op_mul(*(ptensors + 227), *(ptensors + 228), *(ptensors + 229), 187,
            8127, 0, -128, 0);
 
@@ -844,21 +844,21 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     op_copy(*(ptensors + 229), *(ptensors + 230), 187);
 
     // Op#149: CONV_2D
-    *(ptensors + 231) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 231) = g_activation_pool + g_slot_offsets[0];
     op_fc(*(ptensors + 230), 187, 1, 4,
           (const int8_t*)*(ptensors + 18), (const int32_t*)*(ptensors + 67), *(ptensors + 231),
           0, pscales_q16_op149, 0);
 
     // Op#150: RESHAPE
-    *(ptensors + 232) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 232) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 231), *(ptensors + 232), 748);
 
     // Op#151: EXPAND_DIMS
-    *(ptensors + 233) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 233) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 232), *(ptensors + 233), 748);
 
     // Op#152: CONV_2D
-    *(ptensors + 234) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 234) = g_activation_pool + g_slot_offsets[0];
     { static const int32_t pws_q16[1] = {533};
     op_fc(*(ptensors + 233), 187, 4, 1,
           (const int8_t*)*(ptensors + 17), (const int32_t*)*(ptensors + 62), *(ptensors + 234),
@@ -866,16 +866,16 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
     }
 
     // Op#153: RESHAPE
-    *(ptensors + 235) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 235) = g_activation_pool + g_slot_offsets[0];
     op_copy(*(ptensors + 234), *(ptensors + 235), 187);
 
     // Op#154: ADD
-    *(ptensors + 236) = g_activation_pool + g_slot_offsets[1];
+    *(ptensors + 236) = g_activation_pool + g_slot_offsets[0];
     op_add(*(ptensors + 235), *(ptensors + 16), *(ptensors + 236), 187,
            0, 0, 636, -128, 12);
 
     // Op#155: ADD
-    *(ptensors + 237) = g_activation_pool + g_slot_offsets[2];
+    *(ptensors + 237) = g_activation_pool + g_slot_offsets[1];
     op_add(*(ptensors + 236), *(ptensors + 224), *(ptensors + 237), 187,
            65536, 12, 65536, 15, 12);
 

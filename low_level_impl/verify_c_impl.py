@@ -114,6 +114,38 @@ class ECGformerC:
         
         # 初始化
         self.lib.c_init()
+    
+    def inference(self, input_data: np.ndarray) -> tuple:
+        """运行推理
+        
+        Args:
+            input_data: 输入数据，形状 [187] 或 [1, 187, 1]
+            
+        Returns:
+            (预测类别, 输出概率数组)
+        """
+        # 确保输入是正确的形状
+        input_flat = input_data.flatten().astype(np.float32)
+        if len(input_flat) != 187:
+            raise ValueError(f"输入大小必须是187，得到 {len(input_flat)}")
+        
+        # 创建输出缓冲区
+        output = np.zeros(5, dtype=np.float32)
+        
+        # 调用C函数
+        input_ptr = input_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        output_ptr = output.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        
+        pred = self.lib.c_inference(input_ptr, output_ptr)
+        
+        return pred, output
+    
+    def get_int8_output(self) -> np.ndarray:
+        """获取INT8输出（用于验证）"""
+        output = np.zeros(5, dtype=np.int8)
+        output_ptr = output.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
+        self.lib.c_get_int8_output(output_ptr)
+        return output
 
 
 def get_c_implementation_metrics(c_export_dir: str = None) -> Dict[str, Any]:
@@ -275,6 +307,42 @@ def get_c_implementation_metrics(c_export_dir: str = None) -> Dict[str, Any]:
                                     metrics['model_config'].get('SEQ_LEN', 0) ** 2),
         }
     
+    # 5. 解析模型代码统计操作和零拷贝优化
+    model_path = os.path.join(c_export_dir, 'ecgformer_model.c')
+    metrics['ops'] = {
+        'total_copy': 0,
+        'zero_copy': 0,
+        'total_transpose': 0,
+        'fused_attention': 0,
+    }
+    if os.path.exists(model_path):
+        with open(model_path, 'r') as f:
+            model_content = f.read()
+        
+        # 统计 op_copy 调用
+        metrics['ops']['total_copy'] = len(re.findall(r'op_copy\(', model_content))
+        
+        # 统计 transpose 调用
+        metrics['ops']['total_transpose'] = len(re.findall(r'op_transpose_[34]d\(', model_content))
+        
+        # 统计融合注意力块
+        metrics['ops']['fused_attention'] = len(re.findall(r'op_fused_attention_per_head\(', model_content))
+        
+        # 分析零拷贝：输入输出在同一槽位的 op_copy
+        pattern = r'\*\(ptensors \+ (\d+)\) = g_activation_pool \+ g_slot_offsets\[(\d+)\];\s*\n\s*op_copy\(\*\(ptensors \+ (\d+)\)'
+        for match in re.finditer(pattern, model_content):
+            out_tid = int(match.group(1))
+            out_slot = int(match.group(2))
+            in_tid = int(match.group(3))
+            
+            # 查找输入张量的槽位
+            in_pattern = rf'\*\(ptensors \+ {in_tid}\) = g_activation_pool \+ g_slot_offsets\[(\d+)\]'
+            in_match = re.search(in_pattern, model_content)
+            if in_match:
+                in_slot = int(in_match.group(1))
+                if in_slot == out_slot:
+                    metrics['ops']['zero_copy'] += 1
+    
     return metrics
 
 
@@ -347,6 +415,19 @@ def print_c_implementation_metrics(c_export_dir: str = None, verbose: bool = Tru
     print(f"  内存限制:        {limit:,} 字节 ({limit_kb:.2f} KB)")
     print(f"  激活内存利用率:  {utilization:.1f}%")
     
+    # 操作优化统计
+    if 'ops' in metrics and metrics['ops']:
+        print("\n【操作优化统计】")
+        print("-" * 50)
+        ops = metrics['ops']
+        print(f"  Reshape/Expand 操作:   {ops['total_copy']} 次")
+        print(f"  └─ 零拷贝优化:         {ops['zero_copy']} 次 (跳过内存复制)")
+        if ops['total_copy'] > 0:
+            zero_copy_rate = 100 * ops['zero_copy'] / ops['total_copy']
+            print(f"  └─ 零拷贝比例:         {zero_copy_rate:.1f}%")
+        print(f"  Transpose 操作:        {ops['total_transpose']} 次")
+        print(f"  融合注意力块:          {ops['fused_attention']} 个")
+    
     # 注意力模块
     if metrics['attention']:
         print("\n【注意力模块】")
@@ -384,38 +465,6 @@ def print_c_implementation_metrics(c_export_dir: str = None, verbose: bool = Tru
     print()
     
     return metrics
-    
-    def inference(self, input_data: np.ndarray) -> tuple:
-        """运行推理
-        
-        Args:
-            input_data: 输入数据，形状 [187] 或 [1, 187, 1]
-            
-        Returns:
-            (预测类别, 输出概率数组)
-        """
-        # 确保输入是正确的形状
-        input_flat = input_data.flatten().astype(np.float32)
-        if len(input_flat) != 187:
-            raise ValueError(f"输入大小必须是187，得到 {len(input_flat)}")
-        
-        # 创建输出缓冲区
-        output = np.zeros(5, dtype=np.float32)
-        
-        # 调用C函数
-        input_ptr = input_flat.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        output_ptr = output.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
-        
-        pred = self.lib.c_inference(input_ptr, output_ptr)
-        
-        return pred, output
-    
-    def get_int8_output(self) -> np.ndarray:
-        """获取INT8输出（用于验证）"""
-        output = np.zeros(5, dtype=np.int8)
-        output_ptr = output.ctypes.data_as(ctypes.POINTER(ctypes.c_int8))
-        self.lib.c_get_int8_output(output_ptr)
-        return output
 
 
 def verify_with_tflite():
