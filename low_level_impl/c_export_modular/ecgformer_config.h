@@ -14,21 +14,36 @@
 #define OUTPUT_CLASSES 5
 #define NUM_TENSORS 262
 
-// 内存管理模式: reuse (槽位复用)
+// 内存管理模式
+#define MEMORY_MODE_STATIC 0
 #define MEMORY_MODE_REUSE 1
+#define MEMORY_MODE_PINGPONG 2
+#define CURRENT_MEMORY_MODE 2
 
-// 槽位复用模式: 每个槽位可被多个张量复用
-#define NUM_MEMORY_SLOTS 5
-#define ACTIVATION_POOL_SIZE 631312
+// ============== 乒乓缓冲区模式 (严格256KB内存限制) ==============
+// 策略: 槽位复用 + 融合注意力层 (逐Head计算)
+// 融合后避免存储 (8, 187, 187) = 280KB 的注意力矩阵
+
+#define MEMORY_LIMIT 262144
+#define NUM_MEMORY_SLOTS 6
+
+// 注意力计算参数
+#define NUM_HEADS 8
+#define SEQ_LEN 187
+#define HEAD_DIM 16
+#define ATTENTION_PER_HEAD (SEQ_LEN * SEQ_LEN)  // 34969 bytes per head
+
+// 总内存池 (用于激活张量)
+#define ACTIVATION_POOL_SIZE 155397
 
 // 槽位大小数组
-static const int g_slot_sizes[5] = {
-    23936, 279752, 23936, 23936, 279752
+static const int g_slot_sizes[6] = {
+    23936, 23936, 23936, 23936, 23936, 35717
 };
 
 // 槽位偏移数组 (预计算)
-static const int g_slot_offsets[5] = {
-    0, 23936, 303688, 327624, 351560
+static const int g_slot_offsets[6] = {
+    0, 23936, 47872, 71808, 95744, 119680
 };
 
 // 输入量化参数

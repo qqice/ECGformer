@@ -261,6 +261,246 @@ static void op_batch_matmul(const int8_t* pin1, const int8_t* pin2, int8_t* pout
     }
 }
 
+// ============== 乒乓缓冲区模式专用函数 ==============
+
+#if CURRENT_MEMORY_MODE == MEMORY_MODE_PINGPONG
+
+// 逐Head批量矩阵乘法 (用于256KB内存限制模式)
+// 对于大型注意力矩阵，一次只处理一个head，避免内存溢出
+// 输入维度: pin1 [num_heads, seq_len, head_dim], pin2 [num_heads, head_dim, seq_len] (或K^T)
+// 输出维度: pout [num_heads, seq_len, seq_len] (但每次只计算一个head到临时缓冲)
+// ptemp: 临时缓冲区，大小至少 seq_len * seq_len
+static void op_batch_matmul_per_head(
+    const int8_t* pin1, const int8_t* pin2, int8_t* pout, int8_t* ptemp,
+    int num_heads, int seq_len, int head_dim, int side_n,
+    int32_t scale, int z1, int z2, int zo) {
+    
+    HW_BARRIER();
+    
+    int stride1_h = seq_len * head_dim;  // Q/K 每个head的stride
+    int stride2_h = head_dim * side_n;   // K^T/V 每个head的stride (side_n可能是seq_len或head_dim)
+    int stride_out = seq_len * side_n;   // 输出每个head的stride
+    
+    // 逐Head处理，避免同时持有所有head的结果
+    for (volatile int h = 0; h < num_heads; h++) {
+        int base1 = h * stride1_h;
+        int base2 = h * stride2_h;
+        int base_out = h * stride_out;
+        
+        // 计算当前head的矩阵乘法结果到临时缓冲区
+        for (volatile int i = 0; i < seq_len; i++) {
+            for (volatile int j = 0; j < side_n; j++) {
+                int32_t t0 = 0;  // 累加器
+                for (volatile int l = 0; l < head_dim; l++) {
+                    int32_t t1 = (int32_t)*(pin1 + base1 + i * head_dim + l) - z1;
+                    int32_t t2 = (int32_t)*(pin2 + base2 + l * side_n + j) - z2;
+                    t0 += t1 * t2;
+                }
+                int32_t t3 = ((t0 >> 8) * scale) >> 8;
+                // 直接写入最终输出位置
+                *(pout + base_out + i * side_n + j) = saturate_int8(t3 + zo);
+            }
+        }
+        HW_BARRIER();  // 确保每个head计算完成
+    }
+}
+
+// 逐Head注意力计算 (融合 Q*K^T + Softmax + *V)
+// 这是内存高效的注意力实现，一次只处理一个head
+// pQ: [num_heads, seq_len, head_dim]
+// pK: [num_heads, seq_len, head_dim] (会被转置为 [num_heads, head_dim, seq_len])
+// pV: [num_heads, seq_len, head_dim]
+// pout: [num_heads, seq_len, head_dim]
+// ptemp: 临时缓冲区，大小至少 seq_len * seq_len (用于单个head的注意力矩阵)
+static void op_attention_per_head(
+    const int8_t* pQ, const int8_t* pK, const int8_t* pV, int8_t* pout, int8_t* ptemp,
+    int num_heads, int seq_len, int head_dim,
+    int32_t scale_qk, int zq, int zk,      // Q*K^T 的量化参数
+    float scale_softmax_in, int z_softmax,  // Softmax输入的量化参数
+    int32_t scale_av, int za, int zv,       // Attn*V 的量化参数  
+    float scale_softmax_out,                // Softmax输出的量化参数
+    int zo) {
+    
+    HW_BARRIER();
+    
+    int stride_qkv = seq_len * head_dim;
+    int stride_out = seq_len * head_dim;
+    int attn_size = seq_len * seq_len;
+    
+    // 分配临时浮点缓冲区用于softmax
+    float* pvals = (float*)malloc(seq_len * sizeof(float));
+    
+    // 逐Head处理
+    for (volatile int h = 0; h < num_heads; h++) {
+        int base_q = h * stride_qkv;
+        int base_k = h * stride_qkv;
+        int base_v = h * stride_qkv;
+        int base_out = h * stride_out;
+        
+        // Step 1: 计算 Q * K^T -> ptemp [seq_len, seq_len]
+        for (volatile int i = 0; i < seq_len; i++) {
+            for (volatile int j = 0; j < seq_len; j++) {
+                int32_t t0 = 0;
+                for (volatile int l = 0; l < head_dim; l++) {
+                    int32_t q_val = (int32_t)*(pQ + base_q + i * head_dim + l) - zq;
+                    int32_t k_val = (int32_t)*(pK + base_k + j * head_dim + l) - zk;  // 注意K是按行读取，等效于K^T的列
+                    t0 += q_val * k_val;
+                }
+                int32_t t3 = ((t0 >> 8) * scale_qk) >> 8;
+                *(ptemp + i * seq_len + j) = saturate_int8(t3);
+            }
+        }
+        
+        // Step 2: 对每一行应用Softmax (原地，使用浮点)
+        for (volatile int i = 0; i < seq_len; i++) {
+            int row_base = i * seq_len;
+            
+            // 找最大值
+            float max_val = -1e9f;
+            for (volatile int j = 0; j < seq_len; j++) {
+                float val = ((float)(*(ptemp + row_base + j)) - (float)z_softmax) * scale_softmax_in;
+                *(pvals + j) = val;  // 临时存储反量化值
+                if (val > max_val) max_val = val;
+            }
+            
+            // 计算exp并求和
+            float sum = 0.0f;
+            for (volatile int j = 0; j < seq_len; j++) {
+                float exp_val = expf(*(pvals + j) - max_val);
+                *(pvals + j) = exp_val;
+                sum += exp_val;
+            }
+            
+            // 归一化并写回
+            if (sum == 0.0f) sum = 1e-10f;
+            for (volatile int j = 0; j < seq_len; j++) {
+                float prob = *(pvals + j) / sum;
+                int32_t q_val = (int32_t)roundf(prob / scale_softmax_out) + z_softmax;
+                *(ptemp + row_base + j) = saturate_int8(q_val);
+            }
+        }
+        
+        // Step 3: 计算 Attn * V -> pout [seq_len, head_dim]
+        for (volatile int i = 0; i < seq_len; i++) {
+            for (volatile int j = 0; j < head_dim; j++) {
+                int32_t t0 = 0;
+                for (volatile int l = 0; l < seq_len; l++) {
+                    int32_t a_val = (int32_t)*(ptemp + i * seq_len + l) - za;
+                    int32_t v_val = (int32_t)*(pV + base_v + l * head_dim + j) - zv;
+                    t0 += a_val * v_val;
+                }
+                int32_t t3 = ((t0 >> 8) * scale_av) >> 8;
+                *(pout + base_out + i * head_dim + j) = saturate_int8(t3 + zo);
+            }
+        }
+        
+        HW_BARRIER();
+    }
+    
+    free(pvals);
+}
+
+// 融合注意力层: Q @ K^T -> Transpose -> Softmax -> @ V
+// 完全逐Head计算，只需要 seq_len * seq_len bytes 临时缓冲
+// pQ: [1, num_heads, seq_len, head_dim]
+// pK: [1, num_heads, head_dim, seq_len] (已转置)
+// pV: [1, num_heads, seq_len, head_dim]
+// pout: [1, num_heads, seq_len, head_dim]
+static void op_fused_attention_per_head(
+    const int8_t* pQ, const int8_t* pK, const int8_t* pV, int8_t* pout,
+    int num_heads, int seq_len, int head_dim,
+    int32_t scale_qk, int zq, int zk, int z_qk_out,  // Q*K^T 量化参数
+    float scale_qk_out, float scale_softmax_out, int z_softmax,  // Softmax 量化参数
+    int32_t scale_av, int zv, int zo) {  // Attn*V 量化参数
+    
+    HW_BARRIER();
+    
+    // 计算步长
+    int stride_q = seq_len * head_dim;  // Q: (num_heads, seq_len, head_dim)
+    int stride_k = head_dim * seq_len;  // K: (num_heads, head_dim, seq_len) - 已转置
+    int stride_v = seq_len * head_dim;  // V: (num_heads, seq_len, head_dim)
+    int stride_out = seq_len * head_dim;
+    
+    // 静态临时缓冲区 (避免malloc)
+    // 使用全局静态缓冲区，大小足够存储一个head的注意力矩阵
+    static int8_t s_attn_temp[187 * 187];  // seq_len * seq_len
+    static float s_row_temp[187];  // seq_len，用于softmax行计算
+    
+    // 逐Head处理
+    for (volatile int h = 0; h < num_heads; h++) {
+        int base_q = h * stride_q;
+        int base_k = h * stride_k;
+        int base_v = h * stride_v;
+        int base_out = h * stride_out;
+        
+        // Step 1: 计算 Q @ K^T -> attn_scores [seq_len, seq_len]
+        // K的布局是 (num_heads, head_dim, seq_len)，相当于已经是K^T
+        for (volatile int i = 0; i < seq_len; i++) {
+            for (volatile int j = 0; j < seq_len; j++) {
+                int32_t t0 = 0;
+                for (volatile int l = 0; l < head_dim; l++) {
+                    // Q[h, i, l] @ K[h, l, j]
+                    int32_t q_val = (int32_t)*(pQ + base_q + i * head_dim + l) - zq;
+                    int32_t k_val = (int32_t)*(pK + base_k + l * seq_len + j) - zk;
+                    t0 += q_val * k_val;
+                }
+                int32_t t3 = ((t0 >> 8) * scale_qk) >> 8;
+                // 注意力分数存储在临时缓冲区，使用转置后的索引 (j, i)
+                // 因为 TFLite 中的 TRANSPOSE 在 BATCH_MATMUL 之后
+                s_attn_temp[j * seq_len + i] = saturate_int8(t3 + z_qk_out);
+            }
+        }
+        
+        // Step 2: 对每一行应用 Softmax (转置后的注意力矩阵)
+        for (volatile int i = 0; i < seq_len; i++) {
+            int row_base = i * seq_len;
+            
+            // 反量化并找最大值
+            float max_val = -1e9f;
+            for (volatile int j = 0; j < seq_len; j++) {
+                float val = ((float)(s_attn_temp[row_base + j]) - (float)z_qk_out) * scale_qk_out;
+                s_row_temp[j] = val;
+                if (val > max_val) max_val = val;
+            }
+            
+            // 计算 exp 并求和
+            float sum = 0.0f;
+            for (volatile int j = 0; j < seq_len; j++) {
+                float exp_val = expf(s_row_temp[j] - max_val);
+                s_row_temp[j] = exp_val;
+                sum += exp_val;
+            }
+            
+            // 归一化并量化写回
+            if (sum < 1e-10f) sum = 1e-10f;
+            for (volatile int j = 0; j < seq_len; j++) {
+                float prob = s_row_temp[j] / sum;
+                int32_t q_val = (int32_t)roundf(prob / scale_softmax_out) + z_softmax;
+                s_attn_temp[row_base + j] = saturate_int8(q_val);
+            }
+        }
+        
+        // Step 3: 计算 Attn @ V -> output [seq_len, head_dim]
+        for (volatile int i = 0; i < seq_len; i++) {
+            for (volatile int j = 0; j < head_dim; j++) {
+                int32_t t0 = 0;
+                for (volatile int l = 0; l < seq_len; l++) {
+                    // attn[i, l] @ V[h, l, j]
+                    int32_t a_val = (int32_t)s_attn_temp[i * seq_len + l] - z_softmax;
+                    int32_t v_val = (int32_t)*(pV + base_v + l * head_dim + j) - zv;
+                    t0 += a_val * v_val;
+                }
+                int32_t t3 = ((t0 >> 8) * scale_av) >> 8;
+                *(pout + base_out + i * head_dim + j) = saturate_int8(t3 + zo);
+            }
+        }
+        
+        HW_BARRIER();
+    }
+}
+
+#endif // CURRENT_MEMORY_MODE == MEMORY_MODE_PINGPONG
+
 // ============== 归约操作 ==============
 
 // 均值: 沿指定维度求平均 (Q16定点)
