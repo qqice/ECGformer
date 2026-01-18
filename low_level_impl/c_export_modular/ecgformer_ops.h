@@ -124,6 +124,61 @@ static void op_mul(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len
     }
 }
 
+// ============== 带转置输出的操作 (消除显式 transpose) ==============
+
+// ADD + TRANSPOSE (0,2,1,3): 输入 [1,d1,d2,d3]，输出按 [1,d2,d1,d3] 布局写入
+// 用于 Q/V 路径: [1,187,8,16] -> [1,8,187,16]
+static void op_add_transpose_0213(const int8_t* pin1, const int8_t* pin2, int8_t* pout,
+                                   int d1, int d2, int d3,
+                                   int32_t scale1, int z1, int32_t scale2, int z2, int zo) {
+    // 输入步长: [d1, d2, d3]
+    int stride_in_d1 = d2 * d3;
+    int stride_in_d2 = d3;
+    // 输出步长: [d2, d1, d3] -> stride_d2=d1*d3, stride_d1=d3
+    int stride_out_d2 = d1 * d3;
+    int stride_out_d1 = d3;
+    
+    for (volatile int i1 = 0; i1 < d1; i1++) {
+        for (volatile int i2 = 0; i2 < d2; i2++) {
+            for (volatile int i3 = 0; i3 < d3; i3++) {
+                int in_off = i1 * stride_in_d1 + i2 * stride_in_d2 + i3;
+                int out_off = i2 * stride_out_d2 + i1 * stride_out_d1 + i3;
+                int32_t t0 = (int32_t)*(pin1 + in_off) - z1;
+                int32_t t1 = (int32_t)*(pin2 + in_off) - z2;
+                int32_t t2 = (t0 * scale1 + t1 * scale2) >> 16;
+                *(pout + out_off) = saturate_int8(t2 + zo);
+            }
+        }
+    }
+}
+
+// MUL + TRANSPOSE (0,2,3,1): 输入 [1,d1,d2,d3]，输出按 [1,d2,d3,d1] 布局写入
+// 用于 K 路径: [1,187,8,16] -> [1,8,16,187]
+static void op_mul_transpose_0231(const int8_t* pin1, const int8_t* pin2, int8_t* pout,
+                                   int d1, int d2, int d3,
+                                   int32_t scale, int z1, int z2, int zo) {
+    // 输入步长: [d1, d2, d3]
+    int stride_in_d1 = d2 * d3;
+    int stride_in_d2 = d3;
+    // 输出步长: [d2, d3, d1] -> stride_d2=d3*d1, stride_d3=d1, stride_d1=1
+    int stride_out_d2 = d3 * d1;
+    int stride_out_d3 = d1;
+    
+    for (volatile int i1 = 0; i1 < d1; i1++) {
+        for (volatile int i2 = 0; i2 < d2; i2++) {
+            for (volatile int i3 = 0; i3 < d3; i3++) {
+                int in_off = i1 * stride_in_d1 + i2 * stride_in_d2 + i3;
+                int out_off = i2 * stride_out_d2 + i3 * stride_out_d3 + i1;
+                int32_t t0 = (int32_t)*(pin1 + in_off) - z1;
+                int32_t t1 = (int32_t)*(pin2 + in_off) - z2;
+                int32_t t2 = t0 * t1;
+                int32_t t3 = ((t2 >> 8) * scale) >> 8;
+                *(pout + out_off) = saturate_int8(t3 + zo);
+            }
+        }
+    }
+}
+
 // 平方差: pout[i] = (pin1[i] - pin2[i])^2 (Q16定点)
 // scale_diff = (s2/s1) * (1<<16), scale_out = (s1*s1/so) * (1<<16)
 static void op_squared_diff(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
@@ -218,6 +273,49 @@ static void op_fc(const int8_t* pin, int nbatch, int chn_in, int chn_out,
             if (pbias) t0 += *(pbias + o);
             // Q16量化输出: 分步计算适配INT26
             // (t0 >> 8) * scale >> 8 = (t0 * scale) >> 16
+            int32_t t3 = ((t0 >> 8) * *(pscales_q16 + o)) >> 8;
+            *(pout + out_base + o) = saturate_int8(t3 + zo);
+        }
+    }
+}
+
+// 融合 FC 层: 从转置后的4D布局读取输入 (消除显式transpose)
+// 输入布局: [1, d1, d2, d3] 需按 [1, d2, d1, d3] 逻辑访问 (perm = 0,2,1,3)
+// 等效于: transpose(0,2,1,3) -> reshape -> FC
+// 使用步长重映射避免实际数据拷贝
+static void op_fc_from_transposed(const int8_t* pin, int d1, int d2, int d3,
+                                  int chn_out,
+                                  const int8_t* pweight, const int32_t* pbias, int8_t* pout,
+                                  int zi, const int32_t* pscales_q16, int zo) {
+    // 输入维度: [1, d1, d2, d3]，逻辑访问为 [1, d2, d1, d3]
+    // 展平后: nbatch = d2, chn_in = d1 * d3
+    HW_BARRIER();
+    
+    int chn_in = d1 * d3;  // 展平后的输入通道数
+    int nbatch = d2;       // 批次数
+    
+    // 输入步长 (物理布局 [1, d1, d2, d3])
+    int stride_d1 = d2 * d3;
+    int stride_d2 = d3;
+    
+    for (volatile int b = 0; b < nbatch; b++) {
+        int out_base = b * chn_out;
+        for (volatile int o = 0; o < chn_out; o++) {
+            int32_t t0 = 0;  // 累加器
+            int w_base = o * chn_in;
+            // 遍历 d1 和 d3，按转置后的顺序访问
+            int in_idx = 0;
+            for (volatile int i1 = 0; i1 < d1; i1++) {
+                for (volatile int i3 = 0; i3 < d3; i3++) {
+                    // 物理偏移: pin[0, i1, b, i3]
+                    int in_off = i1 * stride_d1 + b * stride_d2 + i3;
+                    int32_t t1 = (int32_t)*(pin + in_off) - zi;
+                    int32_t t2 = (int32_t)*(pweight + w_base + in_idx);
+                    t0 += t1 * t2;
+                    in_idx++;
+                }
+            }
+            if (pbias) t0 += *(pbias + o);
             int32_t t3 = ((t0 >> 8) * *(pscales_q16 + o)) >> 8;
             *(pout + out_base + o) = saturate_int8(t3 + zo);
         }
@@ -405,10 +503,11 @@ static void op_attention_per_head(
 // pQ: [1, num_heads, seq_len, head_dim]
 // pK: [1, num_heads, head_dim, seq_len] (已转置)
 // pV: [1, num_heads, seq_len, head_dim]
-// pout: [1, num_heads, seq_len, head_dim]
+// pout: [1, num_heads, seq_len, head_dim] 或 [1, seq_len, num_heads, head_dim] (取决于transpose_out)
+// transpose_out: 0=输出[1,heads,seq,dim], 1=输出[1,seq,heads,dim] (跳过后续transpose)
 static void op_fused_attention_per_head(
     const int8_t* pQ, const int8_t* pK, const int8_t* pV, int8_t* pout,
-    int num_heads, int seq_len, int head_dim,
+    int num_heads, int seq_len, int head_dim, int transpose_out,
     int32_t scale_qk, int zq, int zk, int z_qk_out,  // Q*K^T 量化参数
     float scale_qk_out, float scale_softmax_out, int z_softmax,  // Softmax 量化参数
     int32_t scale_av, int zv, int zo) {  // Attn*V 量化参数
@@ -419,7 +518,9 @@ static void op_fused_attention_per_head(
     int stride_q = seq_len * head_dim;  // Q: (num_heads, seq_len, head_dim)
     int stride_k = head_dim * seq_len;  // K: (num_heads, head_dim, seq_len) - 已转置
     int stride_v = seq_len * head_dim;  // V: (num_heads, seq_len, head_dim)
-    int stride_out = seq_len * head_dim;
+    // 输出步长取决于是否转置输出
+    int stride_out_h = transpose_out ? head_dim : (seq_len * head_dim);
+    int stride_out_i = transpose_out ? (num_heads * head_dim) : head_dim;
     
     // 静态临时缓冲区 (避免malloc)
     // 使用全局静态缓冲区，大小足够存储一个head的注意力矩阵
@@ -431,7 +532,7 @@ static void op_fused_attention_per_head(
         int base_q = h * stride_q;
         int base_k = h * stride_k;
         int base_v = h * stride_v;
-        int base_out = h * stride_out;
+        // 输出基址: transpose_out ? 无基址(逐元素计算) : h * (seq_len * head_dim)
         
         // Step 1: 计算 Q @ K^T -> attn_scores [seq_len, seq_len]
         // K的布局是 (num_heads, head_dim, seq_len)，相当于已经是K^T
@@ -481,6 +582,9 @@ static void op_fused_attention_per_head(
         }
         
         // Step 3: 计算 Attn @ V -> output [seq_len, head_dim]
+        // 输出布局取决于 transpose_out 参数:
+        //   transpose_out=0: [num_heads, seq_len, head_dim] - 标准布局
+        //   transpose_out=1: [seq_len, num_heads, head_dim] - 转置布局 (跳过后续transpose)
         for (volatile int i = 0; i < seq_len; i++) {
             for (volatile int j = 0; j < head_dim; j++) {
                 int32_t t0 = 0;
@@ -491,7 +595,11 @@ static void op_fused_attention_per_head(
                     t0 += a_val * v_val;
                 }
                 int32_t t3 = ((t0 >> 8) * scale_av) >> 8;
-                *(pout + base_out + i * head_dim + j) = saturate_int8(t3 + zo);
+                // 根据 transpose_out 计算输出偏移
+                // transpose_out=0: out[h, i, j] = h * (seq*dim) + i * dim + j
+                // transpose_out=1: out[i, h, j] = i * (heads*dim) + h * dim + j
+                int out_off = i * stride_out_i + h * stride_out_h + j;
+                *(pout + out_off) = saturate_int8(t3 + zo);
             }
         }
         

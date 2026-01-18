@@ -170,13 +170,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#7: ADD
     *(ptensors + 89) = g_activation_pool + g_slot_offsets[1];
-    op_add(*(ptensors + 88), *(ptensors + 78), *(ptensors + 89), 23936,
-           65537, -1, 75, 0, -1);
-
-    // Op#8: TRANSPOSE
     *(ptensors + 90) = g_activation_pool + g_slot_offsets[3];
-    op_transpose_4d(*(ptensors + 89), *(ptensors + 90), 1, 187, 8, 16, 0, 2, 1, 3);
+    // 融合: ADD + TRANSPOSE(0,2,1,3)
+    op_add_transpose_0213(*(ptensors + 88), *(ptensors + 78), *(ptensors + 90),
+                          187, 8, 16, 65537, -1, 75, 0, -1);
 
+    // Op#8: TRANSPOSE (fused into attention output transpose)
     // Op#9: FULLY_CONNECTED
     *(ptensors + 91) = g_activation_pool + g_slot_offsets[1];
     op_fc(*(ptensors + 86), 187, 1, 128,
@@ -194,13 +193,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#12: MUL
     *(ptensors + 94) = g_activation_pool + g_slot_offsets[4];
-    op_mul(*(ptensors + 93), *(ptensors + 74), *(ptensors + 94), 23936,
-           257, -1, -128, -1);
-
-    // Op#13: TRANSPOSE
     *(ptensors + 95) = g_activation_pool + g_slot_offsets[1];
-    op_transpose_4d(*(ptensors + 94), *(ptensors + 95), 1, 187, 8, 16, 0, 2, 3, 1);
+    // 融合: MUL + TRANSPOSE(0,2,3,1)
+    op_mul_transpose_0231(*(ptensors + 93), *(ptensors + 74), *(ptensors + 95),
+                          187, 8, 16, 257, -1, -128, -1);
 
+    // Op#13: TRANSPOSE (fused into attention output transpose)
     // ===== V 准备操作 (提前执行) =====
     // Op#17: FULLY_CONNECTED
     *(ptensors + 99) = g_activation_pool + g_slot_offsets[1];
@@ -214,37 +212,31 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#19: ADD
     *(ptensors + 101) = g_activation_pool + g_slot_offsets[1];
-    op_add(*(ptensors + 100), *(ptensors + 71), *(ptensors + 101), 23936,
-           4037, 2, 63541, -14, -11);
-
-    // Op#20: TRANSPOSE
     *(ptensors + 102) = g_activation_pool + g_slot_offsets[3];
-    op_transpose_4d(*(ptensors + 101), *(ptensors + 102), 1, 187, 8, 16, 0, 2, 1, 3);
+    // 融合: ADD + TRANSPOSE(0,2,1,3)
+    op_add_transpose_0213(*(ptensors + 100), *(ptensors + 71), *(ptensors + 102),
+                          187, 8, 16, 4037, 2, 63541, -14, -11);
 
+    // Op#20: TRANSPOSE (fused into attention output transpose)
     // ========== 融合注意力块 (Ops #14-#21) ==========
     // 策略: 逐Head计算，避免存储完整的 (8, 187, 187) 注意力矩阵
     // 每个Head只需 ~34969 bytes 临时空间
-    *(ptensors + 103) = g_activation_pool + g_slot_offsets[1];
+    // 优化: 输出直接为转置布局 (1, 187, 8, 16)，跳过后续 TRANSPOSE+RESHAPE
+    *(ptensors + 105) = g_activation_pool + g_slot_offsets[3];
 
     op_fused_attention_per_head(
         *(ptensors + 90),   // Q: (1, 8, 187, 16)
         *(ptensors + 95),   // K: (1, 8, 16, 187)
         *(ptensors + 102),   // V: (1, 8, 187, 16)
-        *(ptensors + 103),  // Out: (1, 8, 187, 16)
-        8, 187, 16,
+        *(ptensors + 105),  // Out: (1, 187, 8, 16)
+        8, 187, 16, 1,  // transpose_out=1
         23, -1, -1, -3,  // QK 量化参数
         8.5386897553e-09f, 3.9062500000e-03f, -128,  // Softmax 量化参数
         256, -11, -11  // AV 量化参数
     );
     
-    // Op#22: TRANSPOSE
-    *(ptensors + 104) = g_activation_pool + g_slot_offsets[3];
-    op_transpose_4d(*(ptensors + 103), *(ptensors + 104), 1, 8, 187, 16, 0, 2, 1, 3);
-
-    // Op#23: RESHAPE
-    *(ptensors + 105) = g_activation_pool + g_slot_offsets[3];
-    op_copy(*(ptensors + 104), *(ptensors + 105), 23936);
-
+    // Op#22: TRANSPOSE (fused into attention output transpose)
+    // Op#23: RESHAPE (fused into attention output transpose)
     // Op#24: FULLY_CONNECTED
     *(ptensors + 106) = g_activation_pool + g_slot_offsets[2];
     { static const int32_t pws_q16[1] = {0};
@@ -356,13 +348,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#46: ADD
     *(ptensors + 128) = g_activation_pool + g_slot_offsets[3];
-    op_add(*(ptensors + 127), *(ptensors + 55), *(ptensors + 128), 23936,
-           65536, -1, 14, 0, -1);
-
-    // Op#47: TRANSPOSE
     *(ptensors + 129) = g_activation_pool + g_slot_offsets[4];
-    op_transpose_4d(*(ptensors + 128), *(ptensors + 129), 1, 187, 8, 16, 0, 2, 1, 3);
+    // 融合: ADD + TRANSPOSE(0,2,1,3)
+    op_add_transpose_0213(*(ptensors + 127), *(ptensors + 55), *(ptensors + 129),
+                          187, 8, 16, 65536, -1, 14, 0, -1);
 
+    // Op#47: TRANSPOSE (fused into attention output transpose)
     // Op#48: FULLY_CONNECTED
     *(ptensors + 130) = g_activation_pool + g_slot_offsets[3];
     op_fc(*(ptensors + 125), 187, 1, 128,
@@ -380,13 +371,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#51: MUL
     *(ptensors + 133) = g_activation_pool + g_slot_offsets[2];
-    op_mul(*(ptensors + 132), *(ptensors + 74), *(ptensors + 133), 23936,
-           257, 1, -128, 1);
-
-    // Op#52: TRANSPOSE
     *(ptensors + 134) = g_activation_pool + g_slot_offsets[3];
-    op_transpose_4d(*(ptensors + 133), *(ptensors + 134), 1, 187, 8, 16, 0, 2, 3, 1);
+    // 融合: MUL + TRANSPOSE(0,2,3,1)
+    op_mul_transpose_0231(*(ptensors + 132), *(ptensors + 74), *(ptensors + 134),
+                          187, 8, 16, 257, 1, -128, 1);
 
+    // Op#52: TRANSPOSE (fused into attention output transpose)
     // ===== V 准备操作 (提前执行) =====
     // Op#56: FULLY_CONNECTED
     *(ptensors + 138) = g_activation_pool + g_slot_offsets[2];
@@ -400,37 +390,31 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#58: ADD
     *(ptensors + 140) = g_activation_pool + g_slot_offsets[1];
-    op_add(*(ptensors + 139), *(ptensors + 49), *(ptensors + 140), 23936,
-           33911, 0, 85324, -6, 6);
-
-    // Op#59: TRANSPOSE
     *(ptensors + 141) = g_activation_pool + g_slot_offsets[2];
-    op_transpose_4d(*(ptensors + 140), *(ptensors + 141), 1, 187, 8, 16, 0, 2, 1, 3);
+    // 融合: ADD + TRANSPOSE(0,2,1,3)
+    op_add_transpose_0213(*(ptensors + 139), *(ptensors + 49), *(ptensors + 141),
+                          187, 8, 16, 33911, 0, 85324, -6, 6);
 
+    // Op#59: TRANSPOSE (fused into attention output transpose)
     // ========== 融合注意力块 (Ops #53-#60) ==========
     // 策略: 逐Head计算，避免存储完整的 (8, 187, 187) 注意力矩阵
     // 每个Head只需 ~34969 bytes 临时空间
-    *(ptensors + 142) = g_activation_pool + g_slot_offsets[1];
+    // 优化: 输出直接为转置布局 (1, 187, 8, 16)，跳过后续 TRANSPOSE+RESHAPE
+    *(ptensors + 144) = g_activation_pool + g_slot_offsets[2];
 
     op_fused_attention_per_head(
         *(ptensors + 129),   // Q: (1, 8, 187, 16)
         *(ptensors + 134),   // K: (1, 8, 16, 187)
         *(ptensors + 141),   // V: (1, 8, 187, 16)
-        *(ptensors + 142),  // Out: (1, 8, 187, 16)
-        8, 187, 16,
+        *(ptensors + 144),  // Out: (1, 187, 8, 16)
+        8, 187, 16, 1,  // transpose_out=1
         253, -1, 1, 29,  // QK 量化参数
         2.1187917199e-08f, 3.9062500000e-03f, -128,  // Softmax 量化参数
         256, 6, 6  // AV 量化参数
     );
     
-    // Op#61: TRANSPOSE
-    *(ptensors + 143) = g_activation_pool + g_slot_offsets[2];
-    op_transpose_4d(*(ptensors + 142), *(ptensors + 143), 1, 8, 187, 16, 0, 2, 1, 3);
-
-    // Op#62: RESHAPE
-    *(ptensors + 144) = g_activation_pool + g_slot_offsets[2];
-    op_copy(*(ptensors + 143), *(ptensors + 144), 23936);
-
+    // Op#61: TRANSPOSE (fused into attention output transpose)
+    // Op#62: RESHAPE (fused into attention output transpose)
     // Op#63: FULLY_CONNECTED
     *(ptensors + 145) = g_activation_pool + g_slot_offsets[1];
     { static const int32_t pws_q16[1] = {0};
@@ -542,13 +526,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#85: ADD
     *(ptensors + 167) = g_activation_pool + g_slot_offsets[3];
-    op_add(*(ptensors + 166), *(ptensors + 41), *(ptensors + 167), 23936,
-           65536, -1, 30, 0, -1);
-
-    // Op#86: TRANSPOSE
     *(ptensors + 168) = g_activation_pool + g_slot_offsets[4];
-    op_transpose_4d(*(ptensors + 167), *(ptensors + 168), 1, 187, 8, 16, 0, 2, 1, 3);
+    // 融合: ADD + TRANSPOSE(0,2,1,3)
+    op_add_transpose_0213(*(ptensors + 166), *(ptensors + 41), *(ptensors + 168),
+                          187, 8, 16, 65536, -1, 30, 0, -1);
 
+    // Op#86: TRANSPOSE (fused into attention output transpose)
     // Op#87: FULLY_CONNECTED
     *(ptensors + 169) = g_activation_pool + g_slot_offsets[3];
     op_fc(*(ptensors + 164), 187, 1, 128,
@@ -566,13 +549,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#90: MUL
     *(ptensors + 172) = g_activation_pool + g_slot_offsets[0];
-    op_mul(*(ptensors + 171), *(ptensors + 74), *(ptensors + 172), 23936,
-           257, -2, -128, -2);
-
-    // Op#91: TRANSPOSE
     *(ptensors + 173) = g_activation_pool + g_slot_offsets[3];
-    op_transpose_4d(*(ptensors + 172), *(ptensors + 173), 1, 187, 8, 16, 0, 2, 3, 1);
+    // 融合: MUL + TRANSPOSE(0,2,3,1)
+    op_mul_transpose_0231(*(ptensors + 171), *(ptensors + 74), *(ptensors + 173),
+                          187, 8, 16, 257, -2, -128, -2);
 
+    // Op#91: TRANSPOSE (fused into attention output transpose)
     // ===== V 准备操作 (提前执行) =====
     // Op#95: FULLY_CONNECTED
     *(ptensors + 177) = g_activation_pool + g_slot_offsets[0];
@@ -586,37 +568,31 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#97: ADD
     *(ptensors + 179) = g_activation_pool + g_slot_offsets[0];
-    op_add(*(ptensors + 178), *(ptensors + 35), *(ptensors + 179), 23936,
-           13318, -2, 62684, -8, 0);
-
-    // Op#98: TRANSPOSE
     *(ptensors + 180) = g_activation_pool + g_slot_offsets[2];
-    op_transpose_4d(*(ptensors + 179), *(ptensors + 180), 1, 187, 8, 16, 0, 2, 1, 3);
+    // 融合: ADD + TRANSPOSE(0,2,1,3)
+    op_add_transpose_0213(*(ptensors + 178), *(ptensors + 35), *(ptensors + 180),
+                          187, 8, 16, 13318, -2, 62684, -8, 0);
 
+    // Op#98: TRANSPOSE (fused into attention output transpose)
     // ========== 融合注意力块 (Ops #92-#99) ==========
     // 策略: 逐Head计算，避免存储完整的 (8, 187, 187) 注意力矩阵
     // 每个Head只需 ~34969 bytes 临时空间
-    *(ptensors + 181) = g_activation_pool + g_slot_offsets[0];
+    // 优化: 输出直接为转置布局 (1, 187, 8, 16)，跳过后续 TRANSPOSE+RESHAPE
+    *(ptensors + 183) = g_activation_pool + g_slot_offsets[2];
 
     op_fused_attention_per_head(
         *(ptensors + 168),   // Q: (1, 8, 187, 16)
         *(ptensors + 173),   // K: (1, 8, 16, 187)
         *(ptensors + 180),   // V: (1, 8, 187, 16)
-        *(ptensors + 181),  // Out: (1, 8, 187, 16)
-        8, 187, 16,
+        *(ptensors + 183),  // Out: (1, 187, 8, 16)
+        8, 187, 16, 1,  // transpose_out=1
         294, -1, -2, -73,  // QK 量化参数
         4.2088466046e-09f, 3.9062500000e-03f, -128,  // Softmax 量化参数
         256, 0, 0  // AV 量化参数
     );
     
-    // Op#100: TRANSPOSE
-    *(ptensors + 182) = g_activation_pool + g_slot_offsets[2];
-    op_transpose_4d(*(ptensors + 181), *(ptensors + 182), 1, 8, 187, 16, 0, 2, 1, 3);
-
-    // Op#101: RESHAPE
-    *(ptensors + 183) = g_activation_pool + g_slot_offsets[2];
-    op_copy(*(ptensors + 182), *(ptensors + 183), 23936);
-
+    // Op#100: TRANSPOSE (fused into attention output transpose)
+    // Op#101: RESHAPE (fused into attention output transpose)
     // Op#102: FULLY_CONNECTED
     *(ptensors + 184) = g_activation_pool + g_slot_offsets[0];
     { static const int32_t pws_q16[1] = {0};
@@ -728,13 +704,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#124: ADD
     *(ptensors + 206) = g_activation_pool + g_slot_offsets[0];
-    op_add(*(ptensors + 205), *(ptensors + 27), *(ptensors + 206), 23936,
-           65537, -2, 568, 0, -2);
-
-    // Op#125: TRANSPOSE
     *(ptensors + 207) = g_activation_pool + g_slot_offsets[3];
-    op_transpose_4d(*(ptensors + 206), *(ptensors + 207), 1, 187, 8, 16, 0, 2, 1, 3);
+    // 融合: ADD + TRANSPOSE(0,2,1,3)
+    op_add_transpose_0213(*(ptensors + 205), *(ptensors + 27), *(ptensors + 207),
+                          187, 8, 16, 65537, -2, 568, 0, -2);
 
+    // Op#125: TRANSPOSE (fused into attention output transpose)
     // Op#126: FULLY_CONNECTED
     *(ptensors + 208) = g_activation_pool + g_slot_offsets[0];
     op_fc(*(ptensors + 203), 187, 1, 128,
@@ -752,13 +727,12 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#129: MUL
     *(ptensors + 211) = g_activation_pool + g_slot_offsets[4];
-    op_mul(*(ptensors + 210), *(ptensors + 74), *(ptensors + 211), 23936,
-           257, 1, -128, 1);
-
-    // Op#130: TRANSPOSE
     *(ptensors + 212) = g_activation_pool + g_slot_offsets[0];
-    op_transpose_4d(*(ptensors + 211), *(ptensors + 212), 1, 187, 8, 16, 0, 2, 3, 1);
+    // 融合: MUL + TRANSPOSE(0,2,3,1)
+    op_mul_transpose_0231(*(ptensors + 210), *(ptensors + 74), *(ptensors + 212),
+                          187, 8, 16, 257, 1, -128, 1);
 
+    // Op#130: TRANSPOSE (fused into attention output transpose)
     // ===== V 准备操作 (提前执行) =====
     // Op#134: FULLY_CONNECTED
     *(ptensors + 216) = g_activation_pool + g_slot_offsets[0];
@@ -772,37 +746,31 @@ int ecgformer_inference(const float* pinput_float, float* poutput_probs) {
 
     // Op#136: ADD
     *(ptensors + 218) = g_activation_pool + g_slot_offsets[0];
-    op_add(*(ptensors + 217), *(ptensors + 21), *(ptensors + 218), 23936,
-           1011, -7, 65425, -5, -4);
-
-    // Op#137: TRANSPOSE
     *(ptensors + 219) = g_activation_pool + g_slot_offsets[2];
-    op_transpose_4d(*(ptensors + 218), *(ptensors + 219), 1, 187, 8, 16, 0, 2, 1, 3);
+    // 融合: ADD + TRANSPOSE(0,2,1,3)
+    op_add_transpose_0213(*(ptensors + 217), *(ptensors + 21), *(ptensors + 219),
+                          187, 8, 16, 1011, -7, 65425, -5, -4);
 
+    // Op#137: TRANSPOSE (fused into attention output transpose)
     // ========== 融合注意力块 (Ops #131-#138) ==========
     // 策略: 逐Head计算，避免存储完整的 (8, 187, 187) 注意力矩阵
     // 每个Head只需 ~34969 bytes 临时空间
-    *(ptensors + 220) = g_activation_pool + g_slot_offsets[0];
+    // 优化: 输出直接为转置布局 (1, 187, 8, 16)，跳过后续 TRANSPOSE+RESHAPE
+    *(ptensors + 222) = g_activation_pool + g_slot_offsets[2];
 
     op_fused_attention_per_head(
         *(ptensors + 207),   // Q: (1, 8, 187, 16)
         *(ptensors + 212),   // K: (1, 8, 16, 187)
         *(ptensors + 219),   // V: (1, 8, 187, 16)
-        *(ptensors + 220),  // Out: (1, 8, 187, 16)
-        8, 187, 16,
+        *(ptensors + 222),  // Out: (1, 187, 8, 16)
+        8, 187, 16, 1,  // transpose_out=1
         0, -2, 1, 0,  // QK 量化参数
         7.8685573612e-09f, 3.9062500000e-03f, -128,  // Softmax 量化参数
         256, -4, -4  // AV 量化参数
     );
     
-    // Op#139: TRANSPOSE
-    *(ptensors + 221) = g_activation_pool + g_slot_offsets[2];
-    op_transpose_4d(*(ptensors + 220), *(ptensors + 221), 1, 8, 187, 16, 0, 2, 1, 3);
-
-    // Op#140: RESHAPE
-    *(ptensors + 222) = g_activation_pool + g_slot_offsets[2];
-    op_copy(*(ptensors + 221), *(ptensors + 222), 23936);
-
+    // Op#139: TRANSPOSE (fused into attention output transpose)
+    // Op#140: RESHAPE (fused into attention output transpose)
     // Op#141: FULLY_CONNECTED
     *(ptensors + 223) = g_activation_pool + g_slot_offsets[0];
     { static const int32_t pws_q16[1] = {0};

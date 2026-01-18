@@ -1030,6 +1030,61 @@ static void op_mul(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len
     }
 }
 
+// ============== 带转置输出的操作 (消除显式 transpose) ==============
+
+// ADD + TRANSPOSE (0,2,1,3): 输入 [1,d1,d2,d3]，输出按 [1,d2,d1,d3] 布局写入
+// 用于 Q/V 路径: [1,187,8,16] -> [1,8,187,16]
+static void op_add_transpose_0213(const int8_t* pin1, const int8_t* pin2, int8_t* pout,
+                                   int d1, int d2, int d3,
+                                   int32_t scale1, int z1, int32_t scale2, int z2, int zo) {
+    // 输入步长: [d1, d2, d3]
+    int stride_in_d1 = d2 * d3;
+    int stride_in_d2 = d3;
+    // 输出步长: [d2, d1, d3] -> stride_d2=d1*d3, stride_d1=d3
+    int stride_out_d2 = d1 * d3;
+    int stride_out_d1 = d3;
+    
+    for (volatile int i1 = 0; i1 < d1; i1++) {
+        for (volatile int i2 = 0; i2 < d2; i2++) {
+            for (volatile int i3 = 0; i3 < d3; i3++) {
+                int in_off = i1 * stride_in_d1 + i2 * stride_in_d2 + i3;
+                int out_off = i2 * stride_out_d2 + i1 * stride_out_d1 + i3;
+                int32_t t0 = (int32_t)*(pin1 + in_off) - z1;
+                int32_t t1 = (int32_t)*(pin2 + in_off) - z2;
+                int32_t t2 = (t0 * scale1 + t1 * scale2) >> 16;
+                *(pout + out_off) = saturate_int8(t2 + zo);
+            }
+        }
+    }
+}
+
+// MUL + TRANSPOSE (0,2,3,1): 输入 [1,d1,d2,d3]，输出按 [1,d2,d3,d1] 布局写入
+// 用于 K 路径: [1,187,8,16] -> [1,8,16,187]
+static void op_mul_transpose_0231(const int8_t* pin1, const int8_t* pin2, int8_t* pout,
+                                   int d1, int d2, int d3,
+                                   int32_t scale, int z1, int z2, int zo) {
+    // 输入步长: [d1, d2, d3]
+    int stride_in_d1 = d2 * d3;
+    int stride_in_d2 = d3;
+    // 输出步长: [d2, d3, d1] -> stride_d2=d3*d1, stride_d3=d1, stride_d1=1
+    int stride_out_d2 = d3 * d1;
+    int stride_out_d3 = d1;
+    
+    for (volatile int i1 = 0; i1 < d1; i1++) {
+        for (volatile int i2 = 0; i2 < d2; i2++) {
+            for (volatile int i3 = 0; i3 < d3; i3++) {
+                int in_off = i1 * stride_in_d1 + i2 * stride_in_d2 + i3;
+                int out_off = i2 * stride_out_d2 + i3 * stride_out_d3 + i1;
+                int32_t t0 = (int32_t)*(pin1 + in_off) - z1;
+                int32_t t1 = (int32_t)*(pin2 + in_off) - z2;
+                int32_t t2 = t0 * t1;
+                int32_t t3 = ((t2 >> 8) * scale) >> 8;
+                *(pout + out_off) = saturate_int8(t3 + zo);
+            }
+        }
+    }
+}
+
 // 平方差: pout[i] = (pin1[i] - pin2[i])^2 (Q16定点)
 // scale_diff = (s2/s1) * (1<<16), scale_out = (s1*s1/so) * (1<<16)
 static void op_squared_diff(const int8_t* pin1, const int8_t* pin2, int8_t* pout, int len,
@@ -1124,6 +1179,49 @@ static void op_fc(const int8_t* pin, int nbatch, int chn_in, int chn_out,
             if (pbias) t0 += *(pbias + o);
             // Q16量化输出: 分步计算适配INT26
             // (t0 >> 8) * scale >> 8 = (t0 * scale) >> 16
+            int32_t t3 = ((t0 >> 8) * *(pscales_q16 + o)) >> 8;
+            *(pout + out_base + o) = saturate_int8(t3 + zo);
+        }
+    }
+}
+
+// 融合 FC 层: 从转置后的4D布局读取输入 (消除显式transpose)
+// 输入布局: [1, d1, d2, d3] 需按 [1, d2, d1, d3] 逻辑访问 (perm = 0,2,1,3)
+// 等效于: transpose(0,2,1,3) -> reshape -> FC
+// 使用步长重映射避免实际数据拷贝
+static void op_fc_from_transposed(const int8_t* pin, int d1, int d2, int d3,
+                                  int chn_out,
+                                  const int8_t* pweight, const int32_t* pbias, int8_t* pout,
+                                  int zi, const int32_t* pscales_q16, int zo) {
+    // 输入维度: [1, d1, d2, d3]，逻辑访问为 [1, d2, d1, d3]
+    // 展平后: nbatch = d2, chn_in = d1 * d3
+    HW_BARRIER();
+    
+    int chn_in = d1 * d3;  // 展平后的输入通道数
+    int nbatch = d2;       // 批次数
+    
+    // 输入步长 (物理布局 [1, d1, d2, d3])
+    int stride_d1 = d2 * d3;
+    int stride_d2 = d3;
+    
+    for (volatile int b = 0; b < nbatch; b++) {
+        int out_base = b * chn_out;
+        for (volatile int o = 0; o < chn_out; o++) {
+            int32_t t0 = 0;  // 累加器
+            int w_base = o * chn_in;
+            // 遍历 d1 和 d3，按转置后的顺序访问
+            int in_idx = 0;
+            for (volatile int i1 = 0; i1 < d1; i1++) {
+                for (volatile int i3 = 0; i3 < d3; i3++) {
+                    // 物理偏移: pin[0, i1, b, i3]
+                    int in_off = i1 * stride_d1 + b * stride_d2 + i3;
+                    int32_t t1 = (int32_t)*(pin + in_off) - zi;
+                    int32_t t2 = (int32_t)*(pweight + w_base + in_idx);
+                    t0 += t1 * t2;
+                    in_idx++;
+                }
+            }
+            if (pbias) t0 += *(pbias + o);
             int32_t t3 = ((t0 >> 8) * *(pscales_q16 + o)) >> 8;
             *(pout + out_base + o) = saturate_int8(t3 + zo);
         }
@@ -1311,10 +1409,11 @@ static void op_attention_per_head(
 // pQ: [1, num_heads, seq_len, head_dim]
 // pK: [1, num_heads, head_dim, seq_len] (已转置)
 // pV: [1, num_heads, seq_len, head_dim]
-// pout: [1, num_heads, seq_len, head_dim]
+// pout: [1, num_heads, seq_len, head_dim] 或 [1, seq_len, num_heads, head_dim] (取决于transpose_out)
+// transpose_out: 0=输出[1,heads,seq,dim], 1=输出[1,seq,heads,dim] (跳过后续transpose)
 static void op_fused_attention_per_head(
     const int8_t* pQ, const int8_t* pK, const int8_t* pV, int8_t* pout,
-    int num_heads, int seq_len, int head_dim,
+    int num_heads, int seq_len, int head_dim, int transpose_out,
     int32_t scale_qk, int zq, int zk, int z_qk_out,  // Q*K^T 量化参数
     float scale_qk_out, float scale_softmax_out, int z_softmax,  // Softmax 量化参数
     int32_t scale_av, int zv, int zo) {  // Attn*V 量化参数
@@ -1325,7 +1424,9 @@ static void op_fused_attention_per_head(
     int stride_q = seq_len * head_dim;  // Q: (num_heads, seq_len, head_dim)
     int stride_k = head_dim * seq_len;  // K: (num_heads, head_dim, seq_len) - 已转置
     int stride_v = seq_len * head_dim;  // V: (num_heads, seq_len, head_dim)
-    int stride_out = seq_len * head_dim;
+    // 输出步长取决于是否转置输出
+    int stride_out_h = transpose_out ? head_dim : (seq_len * head_dim);
+    int stride_out_i = transpose_out ? (num_heads * head_dim) : head_dim;
     
     // 静态临时缓冲区 (避免malloc)
     // 使用全局静态缓冲区，大小足够存储一个head的注意力矩阵
@@ -1337,7 +1438,7 @@ static void op_fused_attention_per_head(
         int base_q = h * stride_q;
         int base_k = h * stride_k;
         int base_v = h * stride_v;
-        int base_out = h * stride_out;
+        // 输出基址: transpose_out ? 无基址(逐元素计算) : h * (seq_len * head_dim)
         
         // Step 1: 计算 Q @ K^T -> attn_scores [seq_len, seq_len]
         // K的布局是 (num_heads, head_dim, seq_len)，相当于已经是K^T
@@ -1387,6 +1488,9 @@ static void op_fused_attention_per_head(
         }
         
         // Step 3: 计算 Attn @ V -> output [seq_len, head_dim]
+        // 输出布局取决于 transpose_out 参数:
+        //   transpose_out=0: [num_heads, seq_len, head_dim] - 标准布局
+        //   transpose_out=1: [seq_len, num_heads, head_dim] - 转置布局 (跳过后续transpose)
         for (volatile int i = 0; i < seq_len; i++) {
             for (volatile int j = 0; j < head_dim; j++) {
                 int32_t t0 = 0;
@@ -1397,7 +1501,11 @@ static void op_fused_attention_per_head(
                     t0 += a_val * v_val;
                 }
                 int32_t t3 = ((t0 >> 8) * scale_av) >> 8;
-                *(pout + base_out + i * head_dim + j) = saturate_int8(t3 + zo);
+                // 根据 transpose_out 计算输出偏移
+                // transpose_out=0: out[h, i, j] = h * (seq*dim) + i * dim + j
+                // transpose_out=1: out[i, h, j] = i * (heads*dim) + h * dim + j
+                int out_off = i * stride_out_i + h * stride_out_h + j;
+                *(pout + out_off) = saturate_int8(t3 + zo);
             }
         }
         
@@ -1855,11 +1963,52 @@ int main(int argc, char* argv[]) {{
         # Attn*V matmul: scale_av = (softmax_scale * v_scale / out_scale) * (1<<16)
         scale_av_q16 = int(round((softmax_scale * v_scale / out_scale) * (1 << 16)))
         
+        # 检测后续是否有可融合的 TRANSPOSE (0,2,1,3)
+        # 查找紧跟着注意力输出的 TRANSPOSE 操作
+        transpose_out = 0
+        final_output_tid = output_tid
+        fused_transpose_op = None
+        fused_reshape_op = None
+        
+        for op in self.ops:
+            if op['id'] > end_op:
+                # 检查是否是使用 attention 输出的 TRANSPOSE
+                if op['type'] == 'TRANSPOSE' and output_tid in op['inputs']:
+                    perm_tid = op['inputs'][1]
+                    perm = self.weights_data.get(perm_tid, np.arange(4)).flatten().tolist()
+                    # 检查是否是 (0,2,1,3) 模式
+                    if len(perm) == 4 and perm == [0, 2, 1, 3]:
+                        transpose_out = 1
+                        fused_transpose_op = op
+                        final_output_tid = op['outputs'][0]
+                        # 继续查找后续的 RESHAPE
+                        for op2 in self.ops:
+                            if op2['id'] > op['id'] and op2['type'] == 'RESHAPE':
+                                if final_output_tid in op2['inputs']:
+                                    fused_reshape_op = op2
+                                    final_output_tid = op2['outputs'][0]
+                                    break
+                        break
+                break  # 只检查紧邻的操作
+        
+        # 标记被融合的操作
+        if transpose_out:
+            if not hasattr(self, 'fused_transpose_ops'):
+                self.fused_transpose_ops = set()
+            if fused_transpose_op:
+                self.fused_transpose_ops.add(fused_transpose_op['id'])
+            if fused_reshape_op:
+                self.fused_transpose_ops.add(fused_reshape_op['id'])
+        
         # 输出张量的内存分配
         memory_mode = getattr(self, 'memory_mode', 'static')
         alloc_code = ''
         if memory_mode in ('pingpong', 'reuse') and hasattr(self, 'slot_assignments'):
-            if output_tid in self.slot_assignments:
+            # 使用最终输出张量的槽位
+            if final_output_tid in self.slot_assignments:
+                slot_idx = self.slot_assignments[final_output_tid]
+                alloc_code = f'    *(ptensors + {final_output_tid}) = g_activation_pool + g_slot_offsets[{slot_idx}];\n'
+            elif output_tid in self.slot_assignments:
                 slot_idx = self.slot_assignments[output_tid]
                 alloc_code = f'    *(ptensors + {output_tid}) = g_activation_pool + g_slot_offsets[{slot_idx}];\n'
         
@@ -1868,16 +2017,24 @@ int main(int argc, char* argv[]) {{
         v_shape = v_info.get('shape', (1, num_heads, seq_len, 16))
         head_dim = int(v_shape[-1]) if len(v_shape) > 3 else 16
         
+        # 根据是否融合 transpose 选择输出张量
+        actual_out_tid = final_output_tid if transpose_out else output_tid
+        out_layout = f"(1, {seq_len}, {num_heads}, {head_dim})" if transpose_out else f"(1, {num_heads}, {seq_len}, {head_dim})"
+        
+        transpose_comment = ""
+        if transpose_out:
+            transpose_comment = f"\n    // 优化: 输出直接为转置布局 {out_layout}，跳过后续 TRANSPOSE+RESHAPE"
+        
         code = f'''    // ========== 融合注意力块 (Ops #{start_op}-#{end_op}) ==========
     // 策略: 逐Head计算，避免存储完整的 (8, 187, 187) 注意力矩阵
-    // 每个Head只需 ~{seq_len * seq_len} bytes 临时空间
+    // 每个Head只需 ~{seq_len * seq_len} bytes 临时空间{transpose_comment}
 {alloc_code}
     op_fused_attention_per_head(
         *(ptensors + {q_tid}),   // Q: (1, {num_heads}, {seq_len}, {head_dim})
         *(ptensors + {k_tid}),   // K: (1, {num_heads}, {head_dim}, {seq_len})
         *(ptensors + {v_tid}),   // V: (1, {num_heads}, {seq_len}, {head_dim})
-        *(ptensors + {output_tid}),  // Out: (1, {num_heads}, {seq_len}, {head_dim})
-        {num_heads}, {seq_len}, {head_dim},
+        *(ptensors + {actual_out_tid}),  // Out: {out_layout}
+        {num_heads}, {seq_len}, {head_dim}, {transpose_out},  // transpose_out={transpose_out}
         {scale_qk_q16}, {q_zp}, {k_zp}, {qk_zp},  // QK 量化参数
         {qk_scale:.10e}f, {softmax_scale:.10e}f, {softmax_zp},  // Softmax 量化参数
         {scale_av_q16}, {v_zp}, {out_zp}  // AV 量化参数
@@ -1885,6 +2042,17 @@ int main(int argc, char* argv[]) {{
     
 '''
         return code
+
+    def _find_following_transpose(self, out_tid):
+        """查找直接使用 out_tid 作为输入的 TRANSPOSE 操作
+        返回 (transpose_op, perm) 或 (None, None)
+        """
+        for op in self.ops:
+            if op['type'] == 'TRANSPOSE' and out_tid in op['inputs']:
+                perm_tid = op['inputs'][1]
+                perm = self.weights_data.get(perm_tid, np.arange(4)).flatten().tolist()
+                return op, [int(p) for p in perm]
+        return None, None
 
     def _generate_op_code_modular(self, op):
         """为单个操作生成代码 - Q16 Fixed-Point Style (模块化版本)
@@ -1904,6 +2072,10 @@ int main(int argc, char* argv[]) {{
         memory_mode = getattr(self, 'memory_mode', 'static')
         
         code = f'    // Op#{op_id}: {op_type}\n'
+        
+        # 检查是否是被融合到注意力输出的 TRANSPOSE/RESHAPE
+        if hasattr(self, 'fused_transpose_ops') and op_id in self.fused_transpose_ops:
+            return f'    // Op#{op_id}: {op_type} (fused into attention output transpose)\n'
         
         # 检查这个操作是否是融合注意力块的一部分
         is_fused = hasattr(self, 'fused_ops') and op_id in self.fused_ops
@@ -1982,8 +2154,30 @@ int main(int argc, char* argv[]) {{
             # Q16: scale1 = (s1/so) * (1<<16), scale2 = (s2/so) * (1<<16)
             scale1_q16 = int(round((s1 / out_scale) * (1 << 16)))
             scale2_q16 = int(round((s2 / out_scale) * (1 << 16)))
-            code += f'    op_add(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
-            code += f'           {scale1_q16}, {z1}, {scale2_q16}, {z2}, {out_zp});\n'
+            
+            # 检测后续是否有可融合的 TRANSPOSE (0,2,1,3)
+            transpose_op, perm = self._find_following_transpose(out_tid)
+            if transpose_op and perm == [0, 2, 1, 3] and len(out_shape) == 4:
+                # 融合 ADD + TRANSPOSE (0,2,1,3)
+                d1, d2, d3 = out_shape[1], out_shape[2], out_shape[3]
+                trans_out_tid = transpose_op['outputs'][0]
+                
+                # 标记 transpose 已被融合
+                if not hasattr(self, 'fused_transpose_ops'):
+                    self.fused_transpose_ops = set()
+                self.fused_transpose_ops.add(transpose_op['id'])
+                
+                # 分配转置后的输出张量
+                if hasattr(self, 'slot_assignments') and trans_out_tid in self.slot_assignments:
+                    slot_idx = self.slot_assignments[trans_out_tid]
+                    code += f'    *(ptensors + {trans_out_tid}) = g_activation_pool + g_slot_offsets[{slot_idx}];\n'
+                
+                code += f'    // 融合: ADD + TRANSPOSE(0,2,1,3)\n'
+                code += f'    op_add_transpose_0213(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {trans_out_tid}),\n'
+                code += f'                          {d1}, {d2}, {d3}, {scale1_q16}, {z1}, {scale2_q16}, {z2}, {out_zp});\n'
+            else:
+                code += f'    op_add(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
+                code += f'           {scale1_q16}, {z1}, {scale2_q16}, {z2}, {out_zp});\n'
         
         elif op_type == 'SUB':
             s1, z1 = self._get_scale_zp(inputs[0])
@@ -2001,8 +2195,30 @@ int main(int argc, char* argv[]) {{
             s2, z2 = self._get_scale_zp(inputs[1])
             # Q16: scale = (s1 * s2 / so) * (1<<16)
             scale_q16 = int(round((s1 * s2 / out_scale) * (1 << 16)))
-            code += f'    op_mul(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
-            code += f'           {scale_q16}, {z1}, {z2}, {out_zp});\n'
+            
+            # 检测后续是否有可融合的 TRANSPOSE (0,2,3,1)
+            transpose_op, perm = self._find_following_transpose(out_tid)
+            if transpose_op and perm == [0, 2, 3, 1] and len(out_shape) == 4:
+                # 融合 MUL + TRANSPOSE (0,2,3,1)
+                d1, d2, d3 = out_shape[1], out_shape[2], out_shape[3]
+                trans_out_tid = transpose_op['outputs'][0]
+                
+                # 标记 transpose 已被融合
+                if not hasattr(self, 'fused_transpose_ops'):
+                    self.fused_transpose_ops = set()
+                self.fused_transpose_ops.add(transpose_op['id'])
+                
+                # 分配转置后的输出张量
+                if hasattr(self, 'slot_assignments') and trans_out_tid in self.slot_assignments:
+                    slot_idx = self.slot_assignments[trans_out_tid]
+                    code += f'    *(ptensors + {trans_out_tid}) = g_activation_pool + g_slot_offsets[{slot_idx}];\n'
+                
+                code += f'    // 融合: MUL + TRANSPOSE(0,2,3,1)\n'
+                code += f'    op_mul_transpose_0231(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {trans_out_tid}),\n'
+                code += f'                          {d1}, {d2}, {d3}, {scale_q16}, {z1}, {z2}, {out_zp});\n'
+            else:
+                code += f'    op_mul(*(ptensors + {inputs[0]}), *(ptensors + {inputs[1]}), *(ptensors + {out_tid}), {out_size},\n'
+                code += f'           {scale_q16}, {z1}, {z2}, {out_zp});\n'
         
         elif op_type == 'SQUARED_DIFFERENCE':
             s1, z1 = self._get_scale_zp(inputs[0])
